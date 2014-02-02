@@ -753,11 +753,21 @@ REDIS credis_connect(const char *host, int port, int timeout)
   /* We can receive 2 version formats: x.yz and x.y.z, where x.yz was only used prior 
    * first 1.1.0 release(?), e.g. stable releases 1.02 and 1.2.6 */
   if (cr_sendfandreceive(rhnd, CR_BULK, "INFO\r\n") == 0) {
-    int items = sscanf(rhnd->reply.bulk,
-                       "redis_version:%d.%d.%d\r\n",
+
+    char *s;
+    s=strstr(rhnd->reply.bulk, "redis_version:");
+
+    if (!s)
+      goto error;
+
+    int items = sscanf(s,
+                       "redis_version:%d.%d.%d",
                        &(rhnd->version.major),
                        &(rhnd->version.minor),
                        &(rhnd->version.patch));
+
+    /*DEBUG("bulk: '%s'\n",rhnd->reply.bulk);*/
+
     if (items < 2)
       goto error;
     if (items == 2) {

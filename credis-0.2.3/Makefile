@@ -1,4 +1,4 @@
-CFLAGS = -g -O2 -Wall
+CFLAGS = -g -O2 -Wall 
 LDFLAGS =
 #CPPFLAGS = -DPRINTDEBUG
 
@@ -29,5 +29,6 @@ credis.o: credis.c credis.h Makefile
 
 install:
 	@echo "Installing library (to be done)"
+
 clean:
 	rm -f *.o *~ $(TARGETS)

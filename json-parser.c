@@ -54,26 +54,32 @@ void json_parse_array( json_object *jobj, char *key) {
 }
 
 /*Parsing the json object*/
-void json_parse(json_object * jobj) {
+void json_print(json_object * jobj, FILE *f)
+{
   enum json_type type;
+
   json_object_object_foreach(jobj, key, val) { /*Passing through every array element*/
-    printf("type: ",type);
-    type = json_object_get_type(val);
-    switch (type) {
-      case json_type_boolean: 
-      case json_type_double: 
-      case json_type_int: 
-      case json_type_string: print_json_value(val);
+
+  type = json_object_get_type(val);
+
+  printf("type: ", type);
+
+  switch (type) {
+    case json_type_boolean:
+    case json_type_double:
+    case json_type_int:
+    case json_type_string: print_json_value(val);
                            break; 
-      case json_type_object: printf("json_type_objectn");
+    case json_type_object: printf("json_type_objectn");
                            jobj = json_object_object_get(jobj, key);
                            json_parse(jobj); 
                            break;
-      case json_type_array: printf("type: json_type_array, ");
+    case json_type_array: printf("type: json_type_array, ");
                           json_parse_array(jobj, key);
                           break;
-    }
   }
+  }
+
 } 
 
 

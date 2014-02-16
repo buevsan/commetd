@@ -1,4 +1,4 @@
-CFLAGS+=-I. -I credis -DDM_DEBUG -Wall
+CFLAGS+=-I. -I credis -DDM_DEBUG -DCLI_DEBUG -Wall
 LIBS=-ljson-c -lfcgi -lfcgi -lpthread -lcredis
 LDFLAGS+=-L./credis 
 
@@ -12,10 +12,10 @@ all: commetd commet-cli
 $(LIBCREDIS): 
 	make  -C credis
 
-commetd: $(LIBCREDIS) dm-main.o json-parser.o utils.o debug.o
+commetd: $(LIBCREDIS) dm-main.o utils.o debug.o libdio.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o commetd $^ $(LIBS)
 
-commet-cli: cli-main.o	
+commet-cli: cli-main.o utils.o debug.o libdio.o 	
 	$(CC) $(CFLAGS) -o commet-cli $^
 		  
 

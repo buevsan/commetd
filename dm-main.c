@@ -33,6 +33,8 @@ typedef struct dm_prm_s
   uint16_t cliport;
   struct in_addr cli_iface;
   struct in_addr fcgi_iface;
+  uint16_t maxths;
+  uint16_t minths;
   union {
    uint8_t foreground:1;
   };
@@ -58,16 +60,47 @@ typedef struct dm_thread_s
   uint8_t stop;
   uint8_t stopped;
   struct dm_thpool_s *pool;
-  int fd;
   void *data;
 } dm_thread_t;
 
+typedef struct dm_fcgi_thprm_s
+{
+  int fd;
+} dm_fcgi_thprm_t;
+
+typedef struct dm_fcgi_thdata_s
+{
+  dm_fcgi_thprm_t p;
+  char *buf;
+  FCGX_Request req;
+  int fd;
+} dm_fcgi_thdata_t;
+
+typedef struct dm_cli_thprm_s
+{
+  int fd;
+} dm_cli_thprm_t;
+
+typedef struct dm_cli_thdata_s
+{
+  dm_cli_thprm_t p;
+  uint8_t *buf;
+  int fd;
+} dm_cli_thdata_t;
+
 typedef struct dm_thpool_s
 {
+  char *name;
   pthread_mutex_t mtx;
-  dm_thread_t **th;
+  dm_thread_t **th;  
+  pthread_mutex_t accept_mtx;
+  void *(*create_f)(void);
+  void (*free_f)(void *);
   void *(*th_fun) (void *);
+  void *data;
   uint16_t cnt;
+  uint16_t maxcnt;
+  uint16_t peakcnt;
   uint16_t type;
   dm_th_pipe_t *thpipe;
 } dm_thpool_t;
@@ -77,13 +110,12 @@ typedef struct dm_vars_s
   dm_prm_t prm;
   dm_state_t st;
   REDIS db;
-  int fcgi_fd;
-  FCGX_Request *fcgi_req;
+  int fcgi_fd;  
   int cli_fd;
   dbg_desc_t dbg;
 
-  dm_thpool_t cli_clients;
-  dm_thpool_t fcgi_clients;
+  dm_thpool_t clipool;
+  dm_thpool_t fcgipool;
   dm_th_pipe_t thpipe;
 
 } dm_vars_t;
@@ -112,6 +144,7 @@ void dm_init_thpool(dm_thpool_t *ta, void* (*th_fun)(void*), uint8_t type, dm_th
 {
   ta->cnt=0;
   ta->th = malloc(sizeof(dm_thread_t)*max);
+  ta->maxcnt = max;
   pthread_mutex_init(&ta->mtx,0);
   ta->th_fun=th_fun;
   ta->type=type;
@@ -129,6 +162,38 @@ void dm_init_th_pipe(dm_th_pipe_t *t)
   pipe(t->fd);
 }
 
+void *create_fcgi_thdata()
+{
+  dm_fcgi_thdata_t *d;
+  d = malloc(sizeof(dm_fcgi_thdata_t));
+  memset(d, 0, sizeof(dm_fcgi_thdata_t));
+  d->buf = malloc(THREADBUFSIZE);
+  d->p.fd = -1;
+  return d;
+}
+
+void free_fcgi_thdata(void *d)
+{
+  free(((dm_fcgi_thdata_t *)d)->buf);
+  free(d);
+}
+
+void *create_cli_thdata()
+{
+  dm_cli_thdata_t *d;
+  d = malloc(sizeof(dm_fcgi_thdata_t));
+  memset(d, 0, sizeof(dm_fcgi_thdata_t));
+  d->buf = malloc(THREADBUFSIZE);
+  d->p.fd = -1;
+  return d;
+}
+
+void free_cli_thdata(void *d)
+{
+  free(((dm_cli_thdata_t *)d)->buf);
+  free(d);
+}
+
 int dm_init_vars(dm_vars_t *v)
 {
   memset(v, 0, sizeof(dm_vars_t));
@@ -136,9 +201,9 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.fcgiport=6666;
   v->prm.cliport=7777;
   v->prm.sleeptimer=1000;
+  v->prm.minths = 1;
+  v->prm.maxths = MAXCLIENTS;
 
-  dm_init_thpool(&v->cli_clients, dm_cli_thread, 0, &v->thpipe, MAXCLIENTS);
-  dm_init_thpool(&v->fcgi_clients, dm_fcgi_thread, 1, &v->thpipe, MAXCLIENTS);
   dm_init_th_pipe(&v->thpipe);
 
   return 0;
@@ -146,6 +211,7 @@ int dm_init_vars(dm_vars_t *v)
 
 int dm_init(dm_vars_t *v)
 {
+  uint16_t i;
   char *s;
   char str[32];  
 
@@ -154,6 +220,15 @@ int dm_init(dm_vars_t *v)
   libdio_setlog(&v->dbg);
 
   DBG("Initilization...");
+
+  dm_init_thpool(&v->clipool, dm_cli_thread, 0, &v->thpipe, v->prm.maxths);
+  v->clipool.name = "cli";
+  v->clipool.create_f = create_cli_thdata;
+  v->clipool.free_f = free_cli_thdata;
+  dm_init_thpool(&v->fcgipool, dm_fcgi_thread, 1, &v->thpipe, v->prm.maxths);
+  v->fcgipool.name = "fcgi";
+  v->fcgipool.create_f = create_fcgi_thdata;
+  v->fcgipool.free_f = free_fcgi_thdata;
 
   if (FCGX_Init()) {
     ERR("Can't init fcgi library!");
@@ -216,6 +291,12 @@ int dm_init(dm_vars_t *v)
   libdio_signal(SIGALRM, sig_handler);
   libdio_signal(SIGCHLD, sigchld_handler);
 
+
+  for (i=0; i<v->prm.minths; ++i) {
+    dm_thpool_add(&v->clipool, &v->cli_fd, sizeof(v->cli_fd));
+    dm_thpool_add(&v->fcgipool, &v->fcgi_fd, sizeof(v->fcgi_fd));
+  }
+
   if (!v->prm.foreground) {
     DBGL(2, "Become a daemon...");
     daemon(0, 0);
@@ -226,11 +307,11 @@ int dm_init(dm_vars_t *v)
 
 int dm_cleanup(dm_vars_t *v)
 {
-  dm_thpool_stop(&v->cli_clients);
-  dm_thpool_stop(&v->fcgi_clients);
+  dm_thpool_stop(&v->clipool);
+  dm_thpool_stop(&v->fcgipool);
 
-  dm_free_thpool(&v->cli_clients);
-  dm_free_thpool(&v->fcgi_clients);
+  dm_free_thpool(&v->clipool);
+  dm_free_thpool(&v->fcgipool);
 
   if (v->fcgi_fd>=0) {
     shutdown(v->fcgi_fd, SHUT_RDWR);
@@ -284,20 +365,6 @@ void sigchld_handler(int signum)
     }
  }
 }
-
-int dm_process_fcgi(dm_vars_t *v) 
-{
-  if (FCGX_InitRequest(v->fcgi_req, v->fcgi_fd, 0))  {
-      ERR("Can't init fcgi req!");
-      return -1;
-  }
-  
-  if (FCGX_Accept_r(v->fcgi_req))
-     LOG("request accepted");
-      
-  return 0;  
-}
-
 
 static struct option loptions[] = {
   {"help", 0, 0, 0},
@@ -397,10 +464,10 @@ int dm_exit(dm_vars_t *v, int code)
 }
 
 
-int dm_thpool_del_client(dm_thpool_t *p, pthread_t tid)
+int dm_thpool_del(dm_thpool_t *p, pthread_t tid)
 {
   int i,j;
-  DBGL(3, "");
+  DBGL(3, "");  
 
   pthread_mutex_lock(&p->mtx);
 
@@ -412,6 +479,10 @@ int dm_thpool_del_client(dm_thpool_t *p, pthread_t tid)
     pthread_mutex_unlock(&p->mtx);
     return -1;
   }
+
+  /* free thread data */
+  if (p->free_f)
+    p->free_f(p->th[i]->data);
 
   free(p->th[i]);
 
@@ -425,37 +496,40 @@ int dm_thpool_del_client(dm_thpool_t *p, pthread_t tid)
 }
 
 
-int dm_handle_new_client(dm_thpool_t *clients, int fd)
+int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
 {
   dm_thread_t *th=0;
   int newfd=-1;
   pthread_t tid;
 
-  newfd = accept(fd, NULL, 0);
-
-  if (newfd<0) {
-    ERR("accept error %s",strerror(errno));
-    goto error;
-  }
-
-  if (clients->cnt>=MAXCLIENTS) {
-    ERR("client count too big");
+  if (pool->cnt>=pool->maxcnt) {
+    ERR("too many threads in pool (%u)!", pool->cnt);
     goto error;
   }
 
   th = malloc(sizeof(dm_thread_t));
   memset(th, 0, sizeof(dm_thread_t));
+  DBGL(3, "th: %p", th);
 
-  th->fd = newfd;
-  th->pool = clients;
+  th->pool = pool;
 
-  pthread_mutex_lock(&clients->mtx);
-  clients->th[clients->cnt]=th;
-  clients->cnt++;
-  pthread_mutex_unlock(&clients->mtx);
+  if (pool->create_f) {
+    /* create thread local data */
+    th->data = pool->create_f();
+    /* copy thread input parametes */
+    memcpy(th->data, data, dsize);
+  }
+  DBGL(3, "thd: %p", th->data);
 
-  DBG("new thread this %p", th);
-  if (pthread_create(&tid, 0, clients->th_fun, th)) {
+  pthread_mutex_lock(&pool->mtx);
+  pool->th[pool->cnt]=th;
+  pool->cnt++;
+  if (pool->cnt > pool->peakcnt)
+    pool->peakcnt = pool->cnt;
+  pthread_mutex_unlock(&pool->mtx);
+
+
+  if (pthread_create(&tid, 0, pool->th_fun, th)) {
     ERR("thread create error");
     return -1;
   }
@@ -491,8 +565,7 @@ void dm_send_thread_exit_signal(dm_thread_t *th)
 
   pthread_mutex_lock(&th->pool->mtx);
 
-  write(p->fd[1], &th->tid, sizeof(pthread_t));
-  write(p->fd[1], &th->pool->type, 1);
+  write(p->fd[1], &th, sizeof(th));
 
   pthread_mutex_unlock(&th->pool->mtx);
   th->stopped=1;
@@ -536,8 +609,6 @@ void dm_json_print(json_object *jobj)
 
 }
 
-
-
 char wrongJSON[]="{ \"answer\":\"wrong JSON\" }";
 
 int dm_process_json_cmd(uint8_t *buf)
@@ -549,7 +620,7 @@ int dm_process_json_cmd(uint8_t *buf)
 
   if (!jobj) {
     ERR("Wrong json!");
-    LIBDIO_FILLSTRRESPONSE(rshdr, wrongJSON, LIBDIO_MSG_JSON_CMD, 0xF1);
+    LIBDIO_FILLJSONRESPONSE(rshdr, wrongJSON, 0xF1);
     return -1;
   }
 
@@ -557,135 +628,202 @@ int dm_process_json_cmd(uint8_t *buf)
 
   json_object_put(jobj);
 
-  LIBDIO_FILLSTRRESPONSE(rshdr, "OK", LIBDIO_MSG_JSON_CMD, 0x0);
+  LIBDIO_FILLJSONRESPONSE(rshdr, "OK", 0x0);
 
   return 0;
 }
 
-int dm_cli_cml_qq_handler(int argc, char **argv, void *data)
+int dm_cli_cml_info_handler(int argc, char **argv, void *data)
 {
    libdio_msg_str_cmd_r_t *hdr = (libdio_msg_str_cmd_r_t *)(((dm_thread_t*)data)->buf);
+
+
    DBG("");
-   sprintf(hdr->response, "qqack");
-   LIBDIO_FILLRESPONSE((&hdr->rhdr), strlen(hdr->response)+1,
-              LIBDIO_MSG_STR_CMD, 0);
+   sprintf(hdr->response, "cli threads %u/%u/%u\n fcgi threads %u/%u/%u\n",
+           dm_vars.clipool.cnt,
+           dm_vars.clipool.peakcnt,
+           dm_vars.clipool.maxcnt,
+           dm_vars.fcgipool.cnt,
+           dm_vars.fcgipool.peakcnt,
+           dm_vars.fcgipool.maxcnt
+           );
+   LIBDIO_FILLRESPONSE((&hdr->rhdr), strlen(hdr->response)+1, LIBDIO_MSG_STR_CMD, 0);
    return 0;
 }
 
 libdio_str_cmd_tbl_t cli_cml_table[] = {
-    {"qq", dm_cli_cml_qq_handler}
+    {"info", dm_cli_cml_info_handler}
 };
 
 void *dm_cli_thread(void *ptr)
 {
   dm_thread_t *th = (dm_thread_t *)ptr;
+  dm_cli_thdata_t *thd = (dm_cli_thdata_t *)th->data;
   libdio_msg_hdr_t *hdr;
   libdio_msg_response_hdr_t *rhdr;
-  libdio_msg_str_cmd_r_t *rshdr;  
+  libdio_msg_str_cmd_r_t *rshdr;    
   uint16_t code;
   int r;
 
-  DBG("started %lu", pthread_self());
+  DBG("started %p", th);
 
-  if (!th->buf)
-    th->buf=malloc(THREADBUFSIZE);
+  while (!th->stop) {
 
-  if (!th->buf) {
-    ERR("Memory low!!!");
-    goto exit;
+    if (th->pool)
+      pthread_mutex_lock(&th->pool->accept_mtx);
+    thd->fd = accept(thd->p.fd, NULL, 0);
+    if (th->pool)
+      pthread_mutex_unlock(&th->pool->accept_mtx);
+
+    if (thd->fd<0) {
+      ERR("accept error %s", strerror(errno));
+      goto exit;
+    }
+
+    hdr = (libdio_msg_hdr_t *)thd->buf;
+    rhdr = (libdio_msg_response_hdr_t *)thd->buf;
+    rshdr = (libdio_msg_str_cmd_r_t*)thd->buf;
+
+    while (!th->stop) {
+
+      r = libdio_waitfd(thd->fd, 500, 'r');
+
+      if (r<0)
+        break;
+
+      if (r>0) {
+        if (th->stop)
+          break;
+        continue;
+      }
+
+      if (recv(thd->fd, thd->buf, 1, MSG_PEEK)!=1) {
+        DBGL(1, "connection closed %p", th);
+        break;
+      }
+
+      if (libdio_read_message(thd->fd, thd->buf))
+        continue;
+
+      code = ntohs(hdr->code);
+      DBGL(1,"msg: len: %u code: %04X", ntohs(hdr->len), code);
+      char unknown[]="Unknown command";
+
+      switch (code) {
+        case LIBDIO_MSG_STR_CMD:
+          DBGL(1,"cm: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
+          if (libdio_process_str_cmd(thd->buf, cli_cml_table, 1, th)==-2);
+            LIBDIO_FILLSTRRESPONSE(rshdr, unknown, 0xF0);
+        break;
+        case LIBDIO_MSG_JSON_CMD:
+          DBGL(1,"json: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
+          dm_process_json_cmd(thd->buf);
+        break;
+        default:
+          LIBDIO_FILLRESPONSE(rhdr, 1, code, 0xFF);
+      }
+
+      libdio_write_message(thd->fd, thd->buf);
+
+    }
+
+    if (thd->fd>=0) {
+      shutdown(thd->fd, SHUT_RDWR);
+      close(thd->fd);
+    }
+
+
+  } // while
+
+  if (th->stop)
+    DBG("stopped %p", th);
+
+exit:
+
+  dm_send_thread_exit_signal(th);
+
+  return &dm_vars;
+}
+
+void dm_print_fcgi_req_params(FCGX_Request *r)
+{
+  char **p;
+  for (p = r->envp; *p; ++p)
+    DBGL(3, "PRM: %s", *p);
+
+}
+
+int dm_process_fcgi(dm_vars_t *v, dm_fcgi_thdata_t *thd)
+{
+  FCGX_Request *r = &thd->req;
+
+  if (FCGX_InitRequest(r, thd->p.fd, 0))  {
+    ERR("Can't init fcgi req!");
+    return -1;
   }
-
-  hdr = (libdio_msg_hdr_t *)th->buf;
-  rhdr = (libdio_msg_response_hdr_t *)th->buf;
-  rshdr = (libdio_msg_str_cmd_r_t*)th->buf;
 
   while (1) {
 
-    r = libdio_waitfd(th->fd, 500, 'r');
+   pthread_mutex_lock(&v->fcgipool.accept_mtx);
+   if (FCGX_Accept_r(r)) {
+     ERR("FCGX_Accept_r");
+     goto exit;
+   }
 
-    if (r<0)
-      break;
+   LOG("request accepted");
+   pthread_mutex_unlock(&v->fcgipool.accept_mtx);
 
-    if (r>0) {
-      if (th->stop) {
-        DBG("stopped %lu", pthread_self());
-        break;
-      }
-      continue;
-    }
+   #ifdef DM_DEBUG
+   dm_print_fcgi_req_params(r);
+   #endif
 
-    if (recv(th->fd, th->buf, 1, MSG_PEEK)!=1) {
-      DBGL(1, "connection closed %llu", pthread_self());
-      break;
-    }
-
-    if (libdio_read_message(th->fd, th->buf))
-      continue;
-
-    code = ntohs(hdr->code);
-    DBGL(1,"msg: len: %u code: %04X", ntohs(hdr->len), code);
-    char unknown[]="Unknown command";
-
-    switch (code) {
-      case LIBDIO_MSG_STR_CMD:
-        DBGL(1,"cm: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
-        if (libdio_process_str_cmd(th->buf, cli_cml_table, 1, th)==-2);
-          LIBDIO_FILLSTRRESPONSE(rshdr, unknown, code, 0xF0);
-      break;
-      case LIBDIO_MSG_JSON_CMD:
-        DBGL(1,"json: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
-        dm_process_json_cmd(th->buf);
-      break;
-      default:
-        LIBDIO_FILLRESPONSE(rhdr, 1, code, 0xFF);
-    }
-
-    libdio_write_message(th->fd, th->buf);
+   FCGX_Finish_r(&thd->req);
 
   }
 
 exit:
 
-  if (th->buf) {
-    free(th->buf);
-    th->buf=0;
-  }  
-
-  dm_send_thread_exit_signal(th);
-  shutdown(th->fd, SHUT_RDWR);
-  close(th->fd);
-
-  return &dm_vars;
+  return 0;
 }
 
 void *dm_fcgi_thread(void *ptr)
 {
   dm_thread_t *th = (dm_thread_t *)ptr;
+  dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)th->data;
   DBG("new fcgi started %lu", pthread_self());
 
-  int cnt=10;
-  while ((--cnt)>0) {
-    DBG("fcgi thread worked");
-    sleep(1);
-  }
+  dm_process_fcgi(&dm_vars, th->data);
 
   dm_send_thread_exit_signal(th);
-  shutdown(th->fd, SHUT_RDWR);
-  close(th->fd);
+  shutdown(thd->p.fd, SHUT_RDWR);
+  close(thd->p.fd);
   return &dm_vars;
 }
 
 
 int dm_handle_thread_exited(dm_vars_t *v)
 {
-  pthread_t tid;
-  uint8_t type;
+  dm_thread_t *th;
   void *p;
+  /*
   read(v->thpipe.fd[0], &tid, sizeof(pthread_t));
   read(v->thpipe.fd[0], &type, 1);
-  pthread_join(tid, &p);
-  DBG("%s thread exited %p", (type)?"fcgi":"cli", p);
-  dm_thpool_del_client((type)?(&v->fcgi_clients):(&v->cli_clients), tid);
+  */
+  read(v->thpipe.fd[0], &th, sizeof(th));
+
+  DBG("thread %p", th);
+  if (!th) {
+    DBG("th==0");
+    return -1;
+  }
+
+  pthread_join(th->tid, &p);
+
+  if (th->pool) {
+    DBG("%s thread exited %p", th->pool->name, p);
+    dm_thpool_del(th->pool, th->tid);
+
+  }
   return 0;
 }
 
@@ -758,6 +896,7 @@ int dm_handle_timeout()
 
 int main(int argc, char **argv)
 {
+
   dm_init_vars(&dm_vars);
 
   if (dm_handle_args(&dm_vars.prm, argc, argv))
@@ -775,10 +914,11 @@ int main(int argc, char **argv)
   FD_SET(dm_vars.fcgi_fd, &set);
   FD_SET(dm_vars.thpipe.fd[0], &set);
 
-  fds[0]=dm_vars.cli_fd;
+  fds[0]=dm_vars.thpipe.fd[0];
+  /*fds[0]=dm_vars.cli_fd;
   fds[1]=dm_vars.fcgi_fd;
-  fds[2]=dm_vars.thpipe.fd[0];
-  fdcount=3;
+  fds[2]=dm_vars.thpipe.fd[0];*/
+  fdcount=1;
 
   struct timeval tv;
 
@@ -790,7 +930,9 @@ int main(int argc, char **argv)
 
     rset = set;
     int maxfd,s ;
-    maxfd = (dm_vars.cli_fd > dm_vars.fcgi_fd)?dm_vars.cli_fd:dm_vars.fcgi_fd;
+
+    /*maxfd = (dm_vars.cli_fd > dm_vars.fcgi_fd)?dm_vars.cli_fd:dm_vars.fcgi_fd;*/
+    maxfd = dm_vars.thpipe.fd[0];
     maxfd += 1;
     s = select(maxfd, &rset, 0, 0, &tv);
 
@@ -816,14 +958,14 @@ int main(int argc, char **argv)
       if (fd==dm_vars.cli_fd) {
         /* new connection */
         DBGL(3,"ADD CLI client %i!", fd);
-        dm_handle_new_client(&dm_vars.cli_clients, fd);
+        dm_thpool_add(&dm_vars.clipool, &fd, sizeof(fd));
         continue;
       };
 
       if (fd==dm_vars.fcgi_fd) {
         /* new connection */
         DBGL(3,"ADD FCGI client %i!", fd);
-        dm_handle_new_client(&dm_vars.fcgi_clients, fd);
+        dm_thpool_add(&dm_vars.fcgipool, &fd, sizeof(fd));
         continue;
       };
 

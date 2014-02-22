@@ -53,8 +53,12 @@ int libdio_signal(int signum, void (*handler)(int));
    rhdr->hdr.code = htons(cod | LIBDIO_MSG_RESPONSE); \
    rhdr->hdr.len = htons(ln);
 
-#define LIBDIO_FILLSTRRESPONSE(rshdr, str, cod, sts) \
+#define LIBDIO_FILLSTRRESPONSE(rshdr, str, sts) \
    strcpy(rshdr->response, str); \
-   LIBDIO_FILLRESPONSE((&(rshdr->rhdr)), strlen(str)+1, cod, sts);
+   LIBDIO_FILLRESPONSE((&(rshdr->rhdr)), strlen(str)+1, LIBDIO_MSG_STR_CMD, sts);
+
+#define LIBDIO_FILLJSONRESPONSE(rshdr, str, sts) \
+   strcpy(rshdr->response, str); \
+   LIBDIO_FILLRESPONSE((&(rshdr->rhdr)), strlen(str)+1, LIBDIO_MSG_JSON_CMD, sts);
 
 #endif

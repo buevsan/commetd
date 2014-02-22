@@ -109,6 +109,8 @@ int cli_connect(cli_vars_t *v)
 
   r = libdio_waitfd(v->fd, 500, 'w');
 
+  DBG("r:%i", r);
+
   if (r!=0)
     return -1;
 
@@ -174,6 +176,8 @@ int cli_handle_long_opt(cli_prm_t *p, int idx)
         printf("Wrong port!\n");
     break;
     case 3:
+      if (!optarg)
+        return 1;
       p->cm=optarg;
     break;
     default:;
@@ -187,7 +191,7 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
   int optidx;
 
   while (1) {
-    c = getopt_long(argc, argv, "jhp:dc:", loptions,  &optidx);
+    c = getopt_long(argc, argv, "jhp:d:c:", loptions,  &optidx);
     if (c==-1)
       break;
     switch (c) {
@@ -199,9 +203,11 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
         p->json=1;
       break;
       case 'd':
-        p->dlevel=3;
+        p->dlevel=strtoul(optarg, 0, 10);
       break;
       case 'c':
+        if (!optarg)
+          return 1;
         p->cm=optarg;
       break;
       case 'h':
@@ -224,7 +230,10 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
    }
 
  if ((optind+2) < argc)
-   p->cm = argv[optind+2];
+   p->cm = argv[optind+2]; 
+
+ if ((!p->cm) || (!strlen(p->cm)))
+   return 1;
 
  return 0;
 }
@@ -234,7 +243,11 @@ int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
   int r;
   int timeout=500;
 
+
   DBG("%s", command);
+
+  if ( !((command) && (buf)))
+    return -1;
 
   libdio_msg_str_cmd_t *hdr=(libdio_msg_str_cmd_t *)buf;
   hdr->hdr.code = htons((!json)?LIBDIO_MSG_STR_CMD:LIBDIO_MSG_JSON_CMD);

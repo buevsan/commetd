@@ -100,7 +100,9 @@ int cli_connect(cli_vars_t *v)
   sa.sin_addr = v->prm.dm_addr;
   sa.sin_port = htons(v->prm.dm_port);
 
-  if (connect(v->fd, (struct sockaddr *)&sa, sizeof(sa))) {
+  r = connect(v->fd, (struct sockaddr *)&sa, sizeof(sa));
+  DBGL(2, "conr= %i", r);
+  if (r) {
     if (errno!=EINPROGRESS) {
       ERR("connect %s", strerror(errno));
       return -1;
@@ -242,7 +244,6 @@ int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
 {
   int r;
   int timeout=500;
-
 
   DBG("%s", command);
 

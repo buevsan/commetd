@@ -56,7 +56,6 @@ struct dm_thpool_s;
 typedef struct dm_thread_s
 {
   pthread_t tid;
-  uint8_t *buf;
   uint8_t stop;
   uint8_t stopped;
   struct dm_thpool_s *pool;
@@ -331,8 +330,7 @@ void sig_handler(int signum)
 {
   LOG("Signal %i received", signum);
 
-  if (signum == SIGHUP) {
-    LOG("Internal states initialized");
+  if (signum == SIGHUP) {    
     return;
   }
 
@@ -381,7 +379,8 @@ void dm_print_help(void)
   printf("commetd \n\n");
   printf("-h - help\n"
          "-d <level> - debug level\n"
-         "-l <file> - logfile\n"
+         "-m <num> - maximum number of threads\n"
+         "-s <num> - started number of threads\n"
          "-f - do not daemonize\n");
 }
 
@@ -426,7 +425,7 @@ int dm_handle_args(dm_prm_t * p, int argc, char **argv)
   int optidx;
 
   while (1) {
-    c = getopt_long(argc, argv, "hfl:d:", loptions,  &optidx);
+    c = getopt_long(argc, argv, "hfl:d:s:m:", loptions,  &optidx);
     if (c==-1)
       break;
     switch (c) {
@@ -440,6 +439,12 @@ int dm_handle_args(dm_prm_t * p, int argc, char **argv)
       break;
       case 'f':
        p->foreground = 1;
+      break;
+      case 's':
+        ut_s2n10(optarg, &p->minths);
+      break;
+      case 'm':
+        ut_s2n10(optarg, &p->maxths);
       break;
       case 'h':
        dm_print_help();
@@ -571,7 +576,7 @@ void dm_send_thread_exit_signal(dm_thread_t *th)
   th->stopped=1;
 }
 
-void dm_json_print(json_object *jobj)
+void dm_json_print(int d, json_object *jobj)
 {
   enum json_type type;
   char vals[64];
@@ -594,8 +599,7 @@ void dm_json_print(json_object *jobj)
       break;
       case json_type_object:
         snprintf(vals, sizeof(vals), "object");
-        /*jobj = json_object_object_get(jobj, key);
-        json_parse(jobj);*/
+        dm_json_print(d+1, json_object_object_get(jobj, key));
       break;
       case json_type_array:
         snprintf(vals, sizeof(vals), "array");
@@ -603,8 +607,8 @@ void dm_json_print(json_object *jobj)
         json_parse_array(jobj, key);*/
       break;
       default:;
-    }
-    DBGL(2, "key: %s type: %i val: %s",key,type, vals);
+    }        
+    DBGL(2, "%u: key: %s type: %i val: %s",d, key, type, vals);
   }
 
 }
@@ -624,7 +628,7 @@ int dm_process_json_cmd(uint8_t *buf)
     return -1;
   }
 
-  dm_json_print(jobj);
+  dm_json_print(0, jobj);
 
   json_object_put(jobj);
 
@@ -635,11 +639,12 @@ int dm_process_json_cmd(uint8_t *buf)
 
 int dm_cli_cml_info_handler(int argc, char **argv, void *data)
 {
-   libdio_msg_str_cmd_r_t *hdr = (libdio_msg_str_cmd_r_t *)(((dm_thread_t*)data)->buf);
-
+   dm_cli_thdata_t * thd = (dm_cli_thdata_t*)data;
+   libdio_msg_str_cmd_r_t *hdr = (libdio_msg_str_cmd_r_t *)thd->buf;
 
    DBG("");
-   sprintf(hdr->response, "cli threads %u/%u/%u\n fcgi threads %u/%u/%u\n",
+
+   sprintf(hdr->response, "cli threads %u/%u/%u\nfcgi threads %u/%u/%u\n",
            dm_vars.clipool.cnt,
            dm_vars.clipool.peakcnt,
            dm_vars.clipool.maxcnt,
@@ -647,7 +652,9 @@ int dm_cli_cml_info_handler(int argc, char **argv, void *data)
            dm_vars.fcgipool.peakcnt,
            dm_vars.fcgipool.maxcnt
            );
+
    LIBDIO_FILLRESPONSE((&hdr->rhdr), strlen(hdr->response)+1, LIBDIO_MSG_STR_CMD, 0);
+
    return 0;
 }
 
@@ -669,16 +676,42 @@ void *dm_cli_thread(void *ptr)
 
   while (!th->stop) {
 
-    if (th->pool)
-      pthread_mutex_lock(&th->pool->accept_mtx);
-    thd->fd = accept(thd->p.fd, NULL, 0);
-    if (th->pool)
-      pthread_mutex_unlock(&th->pool->accept_mtx);
+    do {
 
-    if (thd->fd<0) {
-      ERR("accept error %s", strerror(errno));
-      goto exit;
-    }
+      if (th->pool)
+        pthread_mutex_lock(&th->pool->accept_mtx);
+
+       r=libdio_waitfd(thd->p.fd, 100, 'r');
+
+       if (r>0) {
+         if (th->pool)
+           pthread_mutex_unlock(&th->pool->accept_mtx);
+         if (th->stop)
+           goto stopped;
+         continue;
+       }
+
+       if (r<0) {
+         if (th->pool)
+           pthread_mutex_unlock(&th->pool->accept_mtx);
+         goto exit;
+       }
+
+       thd->fd = accept(thd->p.fd, NULL, 0);
+
+       if (thd->fd<0) {
+         ERR("accept error %s", strerror(errno));
+         if (th->pool)
+           pthread_mutex_unlock(&th->pool->accept_mtx);
+         continue;
+       }
+
+       if (th->pool) {
+         pthread_mutex_unlock(&th->pool->accept_mtx);
+         break;
+       }
+
+    } while (1);
 
     hdr = (libdio_msg_hdr_t *)thd->buf;
     rhdr = (libdio_msg_response_hdr_t *)thd->buf;
@@ -712,8 +745,14 @@ void *dm_cli_thread(void *ptr)
       switch (code) {
         case LIBDIO_MSG_STR_CMD:
           DBGL(1,"cm: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
-          if (libdio_process_str_cmd(thd->buf, cli_cml_table, 1, th)==-2);
-            LIBDIO_FILLSTRRESPONSE(rshdr, unknown, 0xF0);
+          r = libdio_process_str_cmd(thd->buf, cli_cml_table, 1, thd);
+          if (r) {
+           if (r==-2) {
+             LIBDIO_FILLSTRRESPONSE(rshdr, unknown, 0xF0);
+           } else {
+              LIBDIO_FILLSTRRESPONSE(rshdr, "", 0xF1);
+           }
+          }
         break;
         case LIBDIO_MSG_JSON_CMD:
           DBGL(1,"json: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
@@ -735,6 +774,9 @@ void *dm_cli_thread(void *ptr)
 
   } // while
 
+
+stopped:
+
   if (th->stop)
     DBG("stopped %p", th);
 
@@ -753,35 +795,128 @@ void dm_print_fcgi_req_params(FCGX_Request *r)
 
 }
 
-int dm_process_fcgi(dm_vars_t *v, dm_fcgi_thdata_t *thd)
+char *fcgi_answer[] =
+{
+  "Content-type: text/html\r\n",
+  "\r\n",
+  "<html>\r\n",
+  "<head>\r\n",
+  "<title>Hello !!!</title>\r\n",
+  "</head>\r\n",
+  "<body>\r\n",
+  "<h1>Hello! This is commetd server </h1>\r\n",
+  "<p>Request accepted from host <i>",
+  0,
+  "</i></p>\r\n",
+  0,
+  "</body>\r\n",
+  "</html>\r\n",
+  0
+};
+
+void dm_fcgi_out_strs(FCGX_Request *r, char **s)
+{
+  while (*s) {
+   FCGX_PutS(*s, r->out);
+   s++;
+  }
+}
+
+void dm_fcgi_out_strs_n(FCGX_Request *r, char **s)
+{
+  while (*s) {
+   FCGX_PutS("<p>", r->out);
+   FCGX_PutS(*s, r->out);
+   FCGX_PutS("</p>\r\n", r->out);
+   s++;
+  }
+}
+
+void dm_fcgi_out_str_n(FCGX_Request *r, char *s)
+{
+  FCGX_PutS("<p>", r->out);
+  FCGX_PutS(s, r->out);
+  FCGX_PutS("</p>\r\n", r->out);
+}
+
+
+int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
 {
   FCGX_Request *r = &thd->req;
+  char * server_name;
+  int ret;
 
   if (FCGX_InitRequest(r, thd->p.fd, 0))  {
     ERR("Can't init fcgi req!");
     return -1;
   }
 
-  while (1) {
+  while (!th->stop) {
 
-   pthread_mutex_lock(&v->fcgipool.accept_mtx);
-   if (FCGX_Accept_r(r)) {
-     ERR("FCGX_Accept_r");
-     goto exit;
-   }
+    /* wait for req */
 
-   LOG("request accepted");
-   pthread_mutex_unlock(&v->fcgipool.accept_mtx);
+    do {
 
-   #ifdef DM_DEBUG
-   dm_print_fcgi_req_params(r);
-   #endif
+      if (th->pool)
+        pthread_mutex_lock(&th->pool->accept_mtx);
 
-   FCGX_Finish_r(&thd->req);
+       ret=libdio_waitfd(thd->p.fd, 100, 'r');
 
+       if (ret>0) {
+         if (th->pool)
+           pthread_mutex_unlock(&th->pool->accept_mtx);
+         if (th->stop)
+           goto stopped;
+         continue;
+       }
+
+       if (ret<0) {
+         if (th->pool)
+           pthread_mutex_unlock(&th->pool->accept_mtx);
+         goto exit;
+       }
+
+       if (FCGX_Accept_r(r)) {
+         ERR("FCGX_Accept_r");
+         if (th->pool)
+           pthread_mutex_unlock(&th->pool->accept_mtx);
+         continue;
+       }
+
+       if (th->pool) {
+         pthread_mutex_unlock(&th->pool->accept_mtx);
+         break;
+       }
+
+    } while (1);
+
+    DBGL(2, "request accepted");
+
+    #ifdef DM_DEBUG
+    dm_print_fcgi_req_params(r);
+    #endif
+
+    server_name = FCGX_GetParam("SERVER_NAME", r->envp);
+    FCGX_GetStr(thd->buf, THREADBUFSIZE, r->in);
+
+    dm_fcgi_out_strs(r, fcgi_answer);
+    FCGX_PutS(server_name, r->out);
+    dm_fcgi_out_strs(r, &fcgi_answer[10]);
+    dm_fcgi_out_strs_n(r, r->envp);
+    FCGX_PutS("<p> POST: ", r->out);
+    FCGX_PutS(thd->buf, r->out);
+    FCGX_PutS("</p>", r->out);
+    dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
+
+    /*shutdown(r->ipcFd, SHUT_RDWR);*/
+    FCGX_Finish_r(r);
   }
 
+stopped:
 exit:
+
+  if (th->stop)
+    DBG("stopped %p", th);
 
   return 0;
 }
@@ -790,9 +925,9 @@ void *dm_fcgi_thread(void *ptr)
 {
   dm_thread_t *th = (dm_thread_t *)ptr;
   dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)th->data;
-  DBG("new fcgi started %lu", pthread_self());
+  DBG("started %p", th);
 
-  dm_process_fcgi(&dm_vars, th->data);
+  dm_process_fcgi(&dm_vars, th, th->data);
 
   dm_send_thread_exit_signal(th);
   shutdown(thd->p.fd, SHUT_RDWR);
@@ -800,38 +935,40 @@ void *dm_fcgi_thread(void *ptr)
   return &dm_vars;
 }
 
-
 int dm_handle_thread_exited(dm_vars_t *v)
 {
   dm_thread_t *th;
   void *p;
-  /*
-  read(v->thpipe.fd[0], &tid, sizeof(pthread_t));
-  read(v->thpipe.fd[0], &type, 1);
-  */
-  read(v->thpipe.fd[0], &th, sizeof(th));
 
-  DBG("thread %p", th);
-  if (!th) {
-    DBG("th==0");
-    return -1;
-  }
+  while (1) {
 
-  pthread_join(th->tid, &p);
+   if (libdio_waitfd(v->thpipe.fd[0], 100, 'r'))
+     return -1;
 
-  if (th->pool) {
-    DBG("%s thread exited %p", th->pool->name, p);
-    dm_thpool_del(th->pool, th->tid);
+   read(v->thpipe.fd[0], &th, sizeof(th));
+
+   if (!th) {
+     DBG("th==0");
+     return -1;
+   }
+
+   pthread_join(th->tid, &p);
+
+   if (th->pool) {
+     DBG("%s thread exited %p", th->pool->name, p);
+     dm_thpool_del(th->pool, th->tid);
+   }
 
   }
   return 0;
 }
 
+
 void dm_thread_abort(dm_thread_t *th)
 {
-  DBG("thread aborted %lu", th->tid);
+  DBG("thread aborted %p", th);
   pthread_cancel(th->tid);
-  pthread_join(th->tid, 0);
+  /*pthread_join(th->tid, 0);*/
   dm_send_thread_exit_signal(th);
 }
 
@@ -855,35 +992,42 @@ int dm_thread_stop(dm_thread_t *th)
 int dm_thpool_stop(dm_thpool_t *ta)
 {
   int i,cnt;
-  uint16_t timer=10;
+  uint16_t timer;
 
   pthread_mutex_lock(&ta->mtx);
-
   for (i=0;i<ta->cnt;i++)
-    ta->th[i]->stop=1;
+     ta->th[i]->stop=1;
+  timer = ta->cnt;
+  pthread_mutex_unlock(&ta->mtx);
 
-  while (timer--) {
+  while (timer!=0) {
+
     cnt=0;
+    pthread_mutex_lock(&ta->mtx);
     for (i=0;i<ta->cnt;i++)
-      if (!ta->th[i]->stopped)
+      if (!((ta->th[i])->stopped))
         cnt++;
 
-    if (cnt)
-      usleep(50000);
+    pthread_mutex_unlock(&ta->mtx);
 
+    if (cnt) {
+      usleep(110000);
+      timer--;
+    }
     else break;
   }
 
-  if (timer)
+  if (timer) {
+    DBG("pool %s stopped normal %i", ta->name, timer);
     return 0;
+  }
 
-  DBG("%u threads not stopped normaly!", cnt);
-
+  DBG("%u %s threads not stopped normaly!", cnt, ta->name);
+/*
   for (i=0;i<ta->cnt;i++)
     if (!ta->th[i]->stopped)
-      dm_thread_abort(ta->th[i]);
+      dm_thread_abort(ta->th[i]); */
 
-  pthread_mutex_unlock(&ta->mtx);
 
   return 0;
 }
@@ -980,6 +1124,5 @@ int main(int argc, char **argv)
   }
 
   return 0;
-
 }
 

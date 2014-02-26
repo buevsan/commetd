@@ -217,7 +217,7 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
 
   while (1) {
 
-    DBGL(4, "wait '%c' timer %u", m, timer);
+    DBGL(4, "wait fd: %i for '%c' timer %u", fd, m, timer);
     r = select(fd+1, (m=='r')?&set:0, (m=='w')?&set:0, 0, &tv);
 
     if (r<0) {
@@ -225,7 +225,7 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
       if ((errno==EINTR) && (timer))
          return 1;
 
-      ERR("select %s", strerror(errno));
+      ERR("select: %s", strerror(errno));
       return -1;
     }
 
@@ -236,5 +236,19 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
       break;
   }
 
+  return 0;
+}
+
+int libdio_setnonblock(int fd, uint8_t en)
+{
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags==-1)
+    return -1;
+
+  if (en) flags |= O_NONBLOCK;
+  else flags &= O_NONBLOCK;
+
+  if (fcntl(fd, F_SETFL, flags ))
+    return -1;
   return 0;
 }

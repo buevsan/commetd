@@ -22,6 +22,8 @@
 
 #define MAXCLIENTS 32
 #define THREADBUFSIZE 2048
+#define THREADSTACKSIZE 20
+
 
 typedef struct dm_prm_s
 {
@@ -58,6 +60,7 @@ typedef struct dm_thread_s
   pthread_t tid;
   uint8_t stop;
   uint8_t stopped;
+  void *stack;
   struct dm_thpool_s *pool;
   void *data;
 } dm_thread_t;
@@ -93,6 +96,8 @@ typedef struct dm_thpool_s
   pthread_mutex_t mtx;
   dm_thread_t **th;  
   pthread_mutex_t accept_mtx;
+  pthread_attr_t th_attr;
+  uint16_t stacksize;
   void *(*create_f)(void);
   void (*free_f)(void *);
   void *(*th_fun) (void *);
@@ -129,7 +134,7 @@ dm_vars_t dm_vars;
 
 #define ERR(format, ...) debug_print(&dm_vars.dbg, 0, "ERR: "format"\n", ##__VA_ARGS__)
 #define MSG(format, ...) debug_print(&dm_vars.dbg, 0, format"\n", ##__VA_ARGS__)
-#define LOG(format, ...) MSG(format, ##__VA_ARGS__)
+#define LOG(format, ...) MSG("Commetd: "format, ##__VA_ARGS__)
 
 #ifdef DM_DEBUG
 #define DBGL(level, format, ...) debug_print(&dm_vars.dbg, 1+level, "DBG: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
@@ -145,13 +150,17 @@ void dm_init_thpool(dm_thpool_t *ta, void* (*th_fun)(void*), uint8_t type, dm_th
   ta->th = malloc(sizeof(dm_thread_t)*max);
   ta->maxcnt = max;
   pthread_mutex_init(&ta->mtx,0);
+  pthread_mutex_init(&ta->accept_mtx, 0);
+  pthread_attr_init(&ta->th_attr);
+  ta->stacksize=THREADSTACKSIZE;
   ta->th_fun=th_fun;
   ta->type=type;
-  ta->thpipe=p;
+  ta->thpipe=p;  
 }
 
 void dm_free_thpool(dm_thpool_t *p)
 {
+  pthread_attr_destroy(&p->th_attr);
   free(p->th);
 }
 
@@ -218,6 +227,7 @@ int dm_init(dm_vars_t *v)
     return -1;
   libdio_setlog(&v->dbg);
 
+
   DBG("Initilization...");
 
   dm_init_thpool(&v->clipool, dm_cli_thread, 0, &v->thpipe, v->prm.maxths);
@@ -248,6 +258,8 @@ int dm_init(dm_vars_t *v)
     ERR("Can't create fcgi socket %s!", str);
     return -1;
   }
+  libdio_setnonblock(v->fcgi_fd, 1);
+
 
   s=0;
   if (v->prm.redisaddr.s_addr)
@@ -283,6 +295,8 @@ int dm_init(dm_vars_t *v)
     ERR("Listen error '%s'", strerror(errno));
     return -1;
   }
+  libdio_setnonblock(v->cli_fd, 1);
+
 
   libdio_signal(SIGINT, sig_handler);
   libdio_signal(SIGTERM, sig_handler);
@@ -300,6 +314,7 @@ int dm_init(dm_vars_t *v)
     DBGL(2, "Become a daemon...");
     daemon(0, 0);
   }
+
 
   return 0;
 }
@@ -524,6 +539,10 @@ int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
     /* copy thread input parametes */
     memcpy(th->data, data, dsize);
   }
+
+  th->stack = posix_memalign(&th->stack,1024, 1024*pool->stacksize);
+  pthread_attr_setstack(&pool->th_attr, th->stack, pool->stacksize);
+
   DBGL(3, "thd: %p", th->data);
 
   pthread_mutex_lock(&pool->mtx);
@@ -534,7 +553,7 @@ int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
   pthread_mutex_unlock(&pool->mtx);
 
 
-  if (pthread_create(&tid, 0, pool->th_fun, th)) {
+  if (pthread_create(&tid, &pool->th_attr, pool->th_fun, th)) {
     ERR("thread create error");
     return -1;
   }
@@ -662,6 +681,59 @@ libdio_str_cmd_tbl_t cli_cml_table[] = {
     {"info", dm_cli_cml_info_handler}
 };
 
+int dm_cli_thread_accept(void *thdata)
+{
+  dm_cli_thdata_t *thd = (dm_cli_thdata_t *)thdata;
+
+  thd->fd = accept(thd->p.fd, NULL, 0);
+
+  if (thd->fd<0) {
+    ERR("accept: %s", strerror(errno));
+    return -1;
+  }
+
+  return 0;
+}
+
+int dm_thread_accept(dm_thread_t *th, int (*accept_fun)(void *))
+{
+  int r;
+  dm_cli_thdata_t *thd = (dm_cli_thdata_t *)th->data;
+  do {
+      pthread_mutex_lock(&th->pool->accept_mtx);
+
+      if (th->stop) {
+        pthread_mutex_unlock(&th->pool->accept_mtx);
+        return 1;
+      };
+
+      r=libdio_waitfd(thd->p.fd, 100, 'r');
+
+      if (r>0) {
+        pthread_mutex_unlock(&th->pool->accept_mtx);
+        if (th->stop)
+          return 1;
+        continue;
+      }
+
+      if (r<0) {
+        pthread_mutex_unlock(&th->pool->accept_mtx);
+        return -1;
+      }
+
+      if (accept_fun(thd)) {
+        pthread_mutex_unlock(&th->pool->accept_mtx);
+        continue;
+      }
+
+      pthread_mutex_unlock(&th->pool->accept_mtx);
+      break;
+
+  } while (1);
+
+  return 0;
+}
+
 void *dm_cli_thread(void *ptr)
 {
   dm_thread_t *th = (dm_thread_t *)ptr;
@@ -676,42 +748,8 @@ void *dm_cli_thread(void *ptr)
 
   while (!th->stop) {
 
-    do {
-
-      if (th->pool)
-        pthread_mutex_lock(&th->pool->accept_mtx);
-
-       r=libdio_waitfd(thd->p.fd, 100, 'r');
-
-       if (r>0) {
-         if (th->pool)
-           pthread_mutex_unlock(&th->pool->accept_mtx);
-         if (th->stop)
-           goto stopped;
-         continue;
-       }
-
-       if (r<0) {
-         if (th->pool)
-           pthread_mutex_unlock(&th->pool->accept_mtx);
-         goto exit;
-       }
-
-       thd->fd = accept(thd->p.fd, NULL, 0);
-
-       if (thd->fd<0) {
-         ERR("accept error %s", strerror(errno));
-         if (th->pool)
-           pthread_mutex_unlock(&th->pool->accept_mtx);
-         continue;
-       }
-
-       if (th->pool) {
-         pthread_mutex_unlock(&th->pool->accept_mtx);
-         break;
-       }
-
-    } while (1);
+    if (dm_thread_accept(th, dm_cli_thread_accept))
+      goto exit;
 
     hdr = (libdio_msg_hdr_t *)thd->buf;
     rhdr = (libdio_msg_response_hdr_t *)thd->buf;
@@ -775,12 +813,10 @@ void *dm_cli_thread(void *ptr)
   } // while
 
 
-stopped:
+exit:
 
   if (th->stop)
     DBG("stopped %p", th);
-
-exit:
 
   dm_send_thread_exit_signal(th);
 
@@ -840,84 +876,37 @@ void dm_fcgi_out_str_n(FCGX_Request *r, char *s)
 }
 
 
+int dm_fcgi_thread_accept(void *thdata)
+{
+  dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)thdata;
+  if (FCGX_Accept_r(&thd->req)) {
+    ERR("FCGX_Accept_r");
+    return -1;
+  }
+  return 0;
+}
+
+
 int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
 {
   FCGX_Request *r = &thd->req;
   char * server_name;
-  int ret;
 
-  if (FCGX_InitRequest(r, thd->p.fd, 0))  {
-    ERR("Can't init fcgi req!");
-    return -1;
-  }
+  #ifdef DM_DEBUG
+  dm_print_fcgi_req_params(r);
+  #endif
 
-  while (!th->stop) {
+  server_name = FCGX_GetParam("SERVER_NAME", r->envp);
+  FCGX_GetStr(thd->buf, THREADBUFSIZE, r->in);
 
-    /* wait for req */
-
-    do {
-
-      if (th->pool)
-        pthread_mutex_lock(&th->pool->accept_mtx);
-
-       ret=libdio_waitfd(thd->p.fd, 100, 'r');
-
-       if (ret>0) {
-         if (th->pool)
-           pthread_mutex_unlock(&th->pool->accept_mtx);
-         if (th->stop)
-           goto stopped;
-         continue;
-       }
-
-       if (ret<0) {
-         if (th->pool)
-           pthread_mutex_unlock(&th->pool->accept_mtx);
-         goto exit;
-       }
-
-       if (FCGX_Accept_r(r)) {
-         ERR("FCGX_Accept_r");
-         if (th->pool)
-           pthread_mutex_unlock(&th->pool->accept_mtx);
-         continue;
-       }
-
-       if (th->pool) {
-         pthread_mutex_unlock(&th->pool->accept_mtx);
-         break;
-       }
-
-    } while (1);
-
-    DBGL(2, "request accepted");
-
-    #ifdef DM_DEBUG
-    dm_print_fcgi_req_params(r);
-    #endif
-
-    server_name = FCGX_GetParam("SERVER_NAME", r->envp);
-    FCGX_GetStr(thd->buf, THREADBUFSIZE, r->in);
-
-    dm_fcgi_out_strs(r, fcgi_answer);
-    FCGX_PutS(server_name, r->out);
-    dm_fcgi_out_strs(r, &fcgi_answer[10]);
-    dm_fcgi_out_strs_n(r, r->envp);
-    FCGX_PutS("<p> POST: ", r->out);
-    FCGX_PutS(thd->buf, r->out);
-    FCGX_PutS("</p>", r->out);
-    dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
-
-    /*shutdown(r->ipcFd, SHUT_RDWR);*/
-    FCGX_Finish_r(r);
-  }
-
-stopped:
-exit:
-
-  if (th->stop)
-    DBG("stopped %p", th);
-
+  dm_fcgi_out_strs(r, fcgi_answer);
+  FCGX_PutS(server_name, r->out);
+  dm_fcgi_out_strs(r, &fcgi_answer[10]);
+  dm_fcgi_out_strs_n(r, r->envp);
+  FCGX_PutS("<p> POST: ", r->out);
+  FCGX_PutS(thd->buf, r->out);
+  FCGX_PutS("</p>", r->out);
+  dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
   return 0;
 }
 
@@ -925,9 +914,34 @@ void *dm_fcgi_thread(void *ptr)
 {
   dm_thread_t *th = (dm_thread_t *)ptr;
   dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)th->data;
+  FCGX_Request *req = &thd->req;
+  int r;
+
   DBG("started %p", th);
 
-  dm_process_fcgi(&dm_vars, th, th->data);
+  if (FCGX_InitRequest(req, thd->p.fd, 0))  {
+    ERR("Can't init fcgi req!");
+    goto exit;
+  }
+
+  while (!th->stop) {
+
+    /* wait for req */
+    if (dm_thread_accept(th, dm_fcgi_thread_accept))
+      goto exit;
+
+    DBGL(2, "request accepted");
+
+    dm_process_fcgi(&dm_vars, th, th->data);
+
+    /*shutdown(r->ipcFd, SHUT_RDWR);*/
+    FCGX_Finish_r(req);
+  }
+
+exit:
+
+  if (th->stop)
+    DBG("stopped %p", th);
 
   dm_send_thread_exit_signal(th);
   shutdown(thd->p.fd, SHUT_RDWR);
@@ -1048,6 +1062,8 @@ int main(int argc, char **argv)
 
   if (dm_init(&dm_vars))
     dm_exit(&dm_vars, 1);
+
+  LOG("daemon started...");
 
   int fds[3];
   int fdcount;

@@ -43,6 +43,8 @@ int libdio_process_str_cmd(void *rbuf, libdio_str_cmd_tbl_t *cmd_tbl,
                            uint16_t cmd_count, void *data);
 int libdio_execute_cm(char *sockpath, void *buf, size_t bufsize, char *command);
 int libdio_signal(int signum, void (*handler)(int));
+int libdio_setnonblock(int fd, uint8_t en);
+
 
 #define LIBDIO_MSG_RESPONSE    0x8000
 #define LIBDIO_MSG_STR_CMD     0x0000

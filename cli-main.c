@@ -78,12 +78,7 @@ int cli_init(cli_vars_t *v)
   libdio_signal(SIGTERM, sig_handler);
   libdio_signal(SIGHUP, sig_handler);
 
-  /* set nonblock */
-  int flags = fcntl(v->fd, F_GETFL, 0);
-  if (flags==-1)
-    return -1;
-  if (fcntl(v->fd, F_SETFL, flags | O_NONBLOCK))
-    return -1;
+  libdio_setnonblock(v->fd, 1);
 
   return 0;
 }

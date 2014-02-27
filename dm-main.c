@@ -13,8 +13,8 @@
 #include <sys/wait.h>
 
 #include "credis/credis.h"
-#include "fcgi_config.h"
-#include "fcgiapp.h"
+#include <fcgi_config.h>
+#include <fcgiapp.h>
 #include <json/json.h>
 #include "debug.h"
 #include "utils.h"
@@ -268,7 +268,7 @@ int dm_init(dm_vars_t *v)
   v->db = credis_connect(0, v->prm.redisport, 20000);
   if (!v->db) {
     ERR("Can't connect to redis!");
-    return -1;
+    /*return -1;*/
   }  
 
   /* open cli socket */
@@ -461,6 +461,7 @@ int dm_handle_args(dm_prm_t * p, int argc, char **argv)
       case 'm':
         ut_s2n10(optarg, &p->maxths);
       break;
+      case '?':
       case 'h':
        dm_print_help();
        return -1;
@@ -595,13 +596,17 @@ void dm_send_thread_exit_signal(dm_thread_t *th)
   th->stopped=1;
 }
 
+
+char wrongJSON[]="{ \"answer\":\"wrong JSON\" }";
+
+
 void dm_json_print(int d, json_object *jobj)
 {
   enum json_type type;
   char vals[64];
   json_object_object_foreach(jobj, key, val) {
 
-    /*Passing through every array element*/
+  /*Passing through every array element*/
     type = json_object_get_type(val);
     switch (type) {
       case json_type_boolean:
@@ -626,34 +631,105 @@ void dm_json_print(int d, json_object *jobj)
         json_parse_array(jobj, key);*/
       break;
       default:;
-    }        
+    }
     DBGL(2, "%u: key: %s type: %i val: %s",d, key, type, vals);
   }
 
 }
 
-char wrongJSON[]="{ \"answer\":\"wrong JSON\" }";
+typedef struct dm_json_obj_s {
+  char *name;
+  json_type type;
+  struct dm_json_obj_s *next;
+} dm_json_obj_t;
+
+dm_json_obj_t msg_edata_items[]= {
+  { "type", json_type_string, 0 },
+  { "message", json_type_string, 0},
+  { "type_id", json_type_int, 0 },
+  { "unique", json_type_string, 0 },
+  { 0, 0, 0 }
+};
+
+dm_json_obj_t msg_items[]= {
+  { "event_type", json_type_string, 0 },
+  { "receiver", json_type_string, 0 },
+  { "edata", json_type_object, msg_edata_items },
+  { 0, 0, 0 }
+};
+
+json_object *dm_json_getobj(json_object *obj, char *key, json_type type)
+{
+  json_object *o;
+  o = json_object_object_get(obj, key);
+  if (json_object_get_type(o)!=type)
+    return 0;
+  return o;
+}
+
+int dm_json_check(json_object *obj, dm_json_obj_t *table)
+{
+  int i=0;
+  json_object *o;
+  while (table[i].name) {
+    o = dm_json_getobj(obj, table[i].name, table[i].type);
+    if (!o) {
+      ERR("Wrong or absent '%s' json key", table[i].name);
+      return 1;
+    }
+    if (table[i].next)
+      if (dm_json_check(o, table[i].next))
+        return 1;
+    i++;
+  }
+  return 0;
+}
+
+json_object * dm_json_mkanswer(uint16_t code)
+{
+  json_object * answer_o = json_object_new_object();
+  json_object * code_o = json_object_new_int(code);
+  json_object_object_add(answer_o, "code", code_o);
+  return answer_o;
+}
 
 int dm_process_json_cmd(uint8_t *buf)
 {
   libdio_msg_str_cmd_r_t *rshdr = (libdio_msg_str_cmd_r_t *)buf;
-  json_object *jobj=0;
+  json_object *req=0, *ans=0;
+  int r;
 
-  jobj = json_tokener_parse(((libdio_msg_str_cmd_t*)buf)->cmd);
+  req = json_tokener_parse(((libdio_msg_str_cmd_t*)buf)->cmd);
 
-  if (!jobj) {
-    ERR("Wrong json!");
-    LIBDIO_FILLJSONRESPONSE(rshdr, wrongJSON, 0xF1);
-    return -1;
+  if (!req) {
+    ERR("Wrong JSON!");
+    ans = dm_json_mkanswer(666);
+    LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0xF1);
+    r = -1;
+    goto exit;
   }
 
-  dm_json_print(0, jobj);
+  dm_json_print(0, req);
 
-  json_object_put(jobj);
+  if (dm_json_check(req, msg_items)) {
+    ans = dm_json_mkanswer(999);
+    LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0xF1);
+    r = -1;
+    goto exit;
+  }
 
-  LIBDIO_FILLJSONRESPONSE(rshdr, "OK", 0x0);
+  json_object_object_get(req, "event_type");
 
-  return 0;
+
+  ans = dm_json_mkanswer(0);
+  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0x0);
+
+exit:
+
+  json_object_put(req);
+  json_object_put(ans);
+
+  return r;
 }
 
 int dm_cli_cml_info_handler(int argc, char **argv, void *data)
@@ -1011,7 +1087,7 @@ int dm_thpool_stop(dm_thpool_t *ta)
   pthread_mutex_lock(&ta->mtx);
   for (i=0;i<ta->cnt;i++)
      ta->th[i]->stop=1;
-  timer = ta->cnt;
+  timer = (ta->cnt+1);
   pthread_mutex_unlock(&ta->mtx);
 
   while (timer!=0) {

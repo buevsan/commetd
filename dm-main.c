@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 #include <unistd.h>
 #include <getopt.h>
@@ -37,6 +38,7 @@ typedef struct dm_prm_s
   struct in_addr fcgi_iface;
   uint16_t maxths;
   uint16_t minths;
+  int redisdb;
   union {
    uint8_t foreground:1;
   };
@@ -113,7 +115,7 @@ typedef struct dm_vars_s
 {
   dm_prm_t prm;
   dm_state_t st;
-  REDIS db;
+  REDIS db;  
   int fcgi_fd;  
   int cli_fd;
   dbg_desc_t dbg;
@@ -123,6 +125,7 @@ typedef struct dm_vars_s
   dm_th_pipe_t thpipe;
 
 } dm_vars_t;
+
 
 void *dm_cli_thread(void *ptr);
 void *dm_fcgi_thread(void *ptr);
@@ -211,6 +214,7 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.sleeptimer=1000;
   v->prm.minths = 1;
   v->prm.maxths = MAXCLIENTS;
+  v->prm.redisdb = 3;
 
   dm_init_th_pipe(&v->thpipe);
 
@@ -270,6 +274,9 @@ int dm_init(dm_vars_t *v)
     ERR("Can't connect to redis!");
     /*return -1;*/
   }  
+  if (credis_select(v->db, v->prm.redisdb)) {
+    ERR("Can't connect to db '%i'!", v->prm.redisdb);
+  }
 
   /* open cli socket */
   struct sockaddr_in sa;
@@ -484,7 +491,6 @@ int dm_exit(dm_vars_t *v, int code)
   exit(code);
 }
 
-
 int dm_thpool_del(dm_thpool_t *p, pthread_t tid)
 {
   int i,j;
@@ -516,7 +522,6 @@ int dm_thpool_del(dm_thpool_t *p, pthread_t tid)
   return 0;
 }
 
-
 int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
 {
   dm_thread_t *th=0;
@@ -541,7 +546,7 @@ int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
     memcpy(th->data, data, dsize);
   }
 
-  th->stack = posix_memalign(&th->stack,1024, 1024*pool->stacksize);
+  posix_memalign(&th->stack,1024, 1024*pool->stacksize);
   pthread_attr_setstack(&pool->th_attr, th->stack, pool->stacksize);
 
   DBGL(3, "thd: %p", th->data);
@@ -600,7 +605,7 @@ void dm_send_thread_exit_signal(dm_thread_t *th)
 char wrongJSON[]="{ \"answer\":\"wrong JSON\" }";
 
 
-void dm_json_print(int d, json_object *jobj)
+void dm_json_print(char *objname, json_object *jobj)
 {
   enum json_type type;
   char vals[64];
@@ -622,17 +627,18 @@ void dm_json_print(int d, json_object *jobj)
         snprintf(vals, sizeof(vals), "%s", json_object_get_string(val));
       break;
       case json_type_object:
-        snprintf(vals, sizeof(vals), "object");
-        dm_json_print(d+1, json_object_object_get(jobj, key));
+        vals[0]=0;
       break;
       case json_type_array:
-        snprintf(vals, sizeof(vals), "array");
+        vals[0]=0;
         /*printf("type: json_type_array, ");
         json_parse_array(jobj, key);*/
       break;
       default:;
     }
-    DBGL(2, "%u: key: %s type: %i val: %s",d, key, type, vals);
+    DBGL(2, "'%s': key:'%s' val:'%s'", objname, key, vals);
+    if (type == json_type_object)
+      dm_json_print(key, json_object_object_get(jobj, key));
   }
 
 }
@@ -645,16 +651,16 @@ typedef struct dm_json_obj_s {
 
 dm_json_obj_t msg_edata_items[]= {
   { "type", json_type_string, 0 },
-  { "message", json_type_string, 0},
+  { "message", json_type_string, 0 },
   { "type_id", json_type_int, 0 },
   { "unique", json_type_string, 0 },
   { 0, 0, 0 }
 };
 
 dm_json_obj_t msg_items[]= {
-  { "event_type", json_type_string, 0 },
+  { "cmd", json_type_string, 0 },
   { "receiver", json_type_string, 0 },
-  { "edata", json_type_object, msg_edata_items },
+  { "edata", json_type_object, 0 },
   { 0, 0, 0 }
 };
 
@@ -685,52 +691,144 @@ int dm_json_check(json_object *obj, dm_json_obj_t *table)
   return 0;
 }
 
-json_object * dm_json_mkanswer(uint16_t code)
+json_object * dm_json_mkanswer(uint16_t code, char *text)
 {
   json_object * answer_o = json_object_new_object();
   json_object * code_o = json_object_new_int(code);
   json_object_object_add(answer_o, "code", code_o);
+  
+  if ((text) && (text[0])) {
+   json_object * text_o = json_object_new_string(text);
+   json_object_object_add(answer_o, "text", text_o);
+  } 
   return answer_o;
 }
 
-int dm_process_json_cmd(uint8_t *buf)
+int dm_do_set_event(REDIS db, int r, char *edata)
+{
+  DBG("r:%u ed:%s", r, edata);
+  if (credis_set(db, "qq", edata)) {
+    ERR("Can't set redis key '%s' to '%s'", edata);
+    return 1;
+  }
+  return 0;
+}
+
+int dm_do_get_event(REDIS db, int r, char *edata, size_t esize, int *event_type)
+{
+  DBG("r:%u ed:%s", r, edata);
+  return 0;
+}
+
+int dm_do_get_event_after(REDIS db, int r, int time, char *edata, size_t esize, int *event_type)
+{
+  DBG("r:%u ed:%s", r, edata);
+  return 0;
+}
+
+typedef struct str_table_item_s {
+  char *name;
+  uint8_t id;
+} str_table_item_t;
+
+typedef enum
+{EV_SETEVENT, EV_GETEVENT, EV_GETEVENTNM, EV_GETEVENT_AFTER, EV_GETEVENTNM_AFTER}
+event_id_t;
+
+str_table_item_t cm_str_table[]={
+  { "setEvent", EV_SETEVENT },
+  { "getEvent", EV_GETEVENT },
+  { "getEvent", EV_GETEVENTNM },
+  { "getEvent", EV_GETEVENT_AFTER },
+  { "getEvent", EV_GETEVENTNM_AFTER },
+  { 0, EV_GETEVENTNM_AFTER }
+};
+
+int dm_find_str_table(str_table_item_t *t, char *cm)
+{
+  int i = 0;
+  while (t[i].name) {
+    if (!strcmp(cm, t[i].name))
+      return i;
+    i++;
+  }
+  return -1;
+}
+
+
+int dm_process_json_cmd(json_object *req, json_object **ans)
+{
+  json_object *cmd_obj=0, *edata_obj=0, *reciever_obj=0;
+  char *cmd, *edata, *msg = "OK";
+  int r=0, reciever;
+
+  if (!req) {
+    msg = "Wrong JSON syntax!";
+    r = 666;
+    goto exit;
+  }
+
+  dm_json_print("", req);
+
+  if (dm_json_check(req, msg_items)) {
+    msg="Wrong JSON message!";
+    r = 999;
+    goto exit;
+  }
+
+  cmd_obj = dm_json_getobj(req, "cmd", json_type_string);
+  cmd = (char *)json_object_get_string(cmd_obj);
+  reciever_obj = dm_json_getobj(req, "reciever", json_type_int);
+  reciever = json_object_get_int(reciever_obj);
+  edata_obj = dm_json_getobj(req, "edata", json_type_object);
+  edata = (char *)json_object_to_json_string(edata_obj);
+
+  DBG("cmd: '%s' reciever: %u", cmd, reciever);
+
+  int cmid = dm_find_str_table(cm_str_table, cmd);
+  DBG("cmid: %u", cmid);
+
+  switch (cmid) {
+    case EV_SETEVENT:
+      dm_do_set_event(dm_vars.db, reciever, edata);
+    break;
+    case EV_GETEVENT:
+      dm_do_get_event(dm_vars.db, reciever, 0,0,0);
+    break;
+    case EV_GETEVENT_AFTER:
+    break;
+  }    
+
+exit:
+
+  (*ans)=dm_json_mkanswer(r, msg);
+  DBG("ans %s", json_object_to_json_string(*ans))
+
+  if (edata_obj)
+    json_object_put(edata_obj);
+
+  if (reciever_obj)
+    json_object_put(reciever_obj);
+
+  if (cmd_obj)
+    json_object_put(cmd_obj);
+
+  return r;
+}
+
+int dm_process_json_cmd_buf(uint8_t *buf)
 {
   libdio_msg_str_cmd_r_t *rshdr = (libdio_msg_str_cmd_r_t *)buf;
   json_object *req=0, *ans=0;
   int r;
-
   req = json_tokener_parse(((libdio_msg_str_cmd_t*)buf)->cmd);
-
-  if (!req) {
-    ERR("Wrong JSON!");
-    ans = dm_json_mkanswer(666);
-    LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0xF1);
-    r = -1;
-    goto exit;
-  }
-
-  dm_json_print(0, req);
-
-  if (dm_json_check(req, msg_items)) {
-    ans = dm_json_mkanswer(999);
-    LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0xF1);
-    r = -1;
-    goto exit;
-  }
-
-  json_object_object_get(req, "event_type");
-
-
-  ans = dm_json_mkanswer(0);
-  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0x0);
-
-exit:
-
-  json_object_put(req);
+  r = dm_process_json_cmd(req, &ans);
+  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), r?0xF1:0);
   json_object_put(ans);
-
-  return r;
+  json_object_put(req);
+  return 0;
 }
+
 
 int dm_cli_cml_info_handler(int argc, char **argv, void *data)
 {
@@ -870,7 +968,7 @@ void *dm_cli_thread(void *ptr)
         break;
         case LIBDIO_MSG_JSON_CMD:
           DBGL(1,"json: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
-          dm_process_json_cmd(thd->buf);
+          dm_process_json_cmd_buf(thd->buf);
         break;
         default:
           LIBDIO_FILLRESPONSE(rhdr, 1, code, 0xFF);
@@ -962,17 +1060,147 @@ int dm_fcgi_thread_accept(void *thdata)
   return 0;
 }
 
+void url2s(char *dst, const char *src)
+{
+  char a, b;
+  while (*src) {
+    if ((*src == '%') &&
+       ((a = src[1]) && (b = src[2])) &&
+       (isxdigit(a) && isxdigit(b))) {
+       if (a >= 'a')
+         a -= 'a'-'A';
+       if (a >= 'A')
+         a -= ('A' - 10);
+       else
+         a -= '0';
+       if (b >= 'a')
+         b -= 'a'-'A';
+       if (b >= 'A')
+         b -= ('A' - 10);
+       else
+         b -= '0';
+         *dst++ = 16*a+b;
+         src+=3;
+       } else {
+         *dst++ = *src++;
+       }
+  }
+  *dst++ = '\0';
+}
+
+json_type dm_getjsontype(char *s)
+{
+  int i, l, d = 1;
+  l=strlen(s);
+
+  for (i=0;i<l;++i) {
+    if (s[i]=='{')
+       return json_type_object;
+    if (!isdigit(s[i]))
+      d=0;
+  }
+
+  if (d)
+     return json_type_int;
+
+  return json_type_string;
+}
+
+int dm_fcgi2json(char *str, int s, int e, json_object *obj)
+{
+  int m;
+  char *ch, c;
+  json_object *o;
+
+  ch = strchr(&str[s], '=');
+
+  if (!ch)
+    return -1;
+
+  m = ch - str;
+  str[m]=0;
+  c = str[e+1];
+  str[e+1]=0;
+  DBG("'%s':'%s'", &str[s], &str[m+1]);
+
+  switch (dm_getjsontype(&str[m+1])) {
+    case json_type_int:
+      o = json_object_new_int(strtoul(&str[m+1],0,10));
+    break;
+    case json_type_object:
+      o = json_tokener_parse(&str[m+1]);
+    break;
+    default:
+      o = json_object_new_string(&str[m+1]);
+  }
+
+  if (o)
+   json_object_object_add(obj, &str[s], o);
+
+  str[m]='=';
+  str[e+1]=c;
+
+  if (!o)
+    return -1;
+
+  return 0;
+}
+
+json_object *dm_qs2json(char *qs)
+{    
+  char *pc;
+  json_object *obj;
+  int l = strlen(qs);
+  int s=0,e=0;
+
+  obj = json_object_new_object();
+
+  while (s<l) {
+
+    pc = strchr(&qs[s], '&');
+    if (pc==qs) {
+      json_object_put(obj);
+      return 0;
+    }
+    e = (pc)?((pc-qs)-1):(l-1);
+
+    if (dm_fcgi2json(qs, s, e, obj)) {
+      json_object_put(obj);
+      return 0;
+    }
+/*
+    if (e<(l-1))
+      qs[e+1]=0;
+    DBG("fcgiprm: '%s'", &qs[s]);
+    if (e<(l-1))
+      qs[e+1]='&';
+*/
+    s=(e+2);
+
+  }
+
+  return obj;
+}
 
 int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
 {
   FCGX_Request *r = &thd->req;
-  char * server_name;
+  char * server_name=0, *query_string=0;
+  char q_string[256];
+  json_object *req=0, *ans=0;
 
   #ifdef DM_DEBUG
   dm_print_fcgi_req_params(r);
   #endif
 
   server_name = FCGX_GetParam("SERVER_NAME", r->envp);
+  query_string = FCGX_GetParam("QUERY_STRING", r->envp);
+
+  url2s(q_string, query_string);
+  req = dm_qs2json(q_string);
+
+  dm_process_json_cmd(req, &ans);
+
   FCGX_GetStr(thd->buf, THREADBUFSIZE, r->in);
 
   dm_fcgi_out_strs(r, fcgi_answer);
@@ -982,7 +1210,15 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   FCGX_PutS("<p> POST: ", r->out);
   FCGX_PutS(thd->buf, r->out);
   FCGX_PutS("</p>", r->out);
+
+ /* FCGX_PutS("<p> ANSWER: ", r->out);
+  FCGX_PutS(json_object_to_json_string(ans), r->out);
+  FCGX_PutS("</p>", r->out);*/
   dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
+
+  json_object_put(req);
+  json_object_put(ans);
+
   return 0;
 }
 

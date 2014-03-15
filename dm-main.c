@@ -12,6 +12,7 @@
 #include <sys/select.h>
 #include <sys/signal.h>
 #include <sys/wait.h>
+#include <time.h>
 
 #include "credis/credis.h"
 #include <fcgi_config.h>
@@ -24,7 +25,6 @@
 #define MAXCLIENTS 32
 #define THREADBUFSIZE 2048
 #define THREADSTACKSIZE 20
-
 
 typedef struct dm_prm_s
 {
@@ -39,6 +39,7 @@ typedef struct dm_prm_s
   uint16_t maxths;
   uint16_t minths;
   int redisdb;
+  char bdprefix[33];
   union {
    uint8_t foreground:1;
   };
@@ -215,6 +216,7 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.minths = 1;
   v->prm.maxths = MAXCLIENTS;
   v->prm.redisdb = 3;
+  strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
 
   dm_init_th_pipe(&v->thpipe);
 
@@ -388,12 +390,14 @@ void sigchld_handler(int signum)
 
 static struct option loptions[] = {
   {"help", 0, 0, 0},
-  {"rdhost", 1, 0, 0},
-  {"rdport", 1, 0, 0},
+  {"rd-host", 1, 0, 0},
+  {"rd-port", 1, 0, 0},
   {"fcgi-port, 1, 0, 0"},
   {"cli-port, 1, 0, 0"},
   {"fcgi-iface, 1, 0, 0"},
-  {"cli-iface, 1, 0, 0"}
+  {"cli-iface, 1, 0, 0"},
+  {"rd-prefix, 1, 0, 0"},
+  {0, 0, 0, 0}
 };
 
 void dm_print_help(void)
@@ -434,8 +438,11 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
         printf("Wrong FCGI iface!\n");
     break;
     case 6:
-     if (!inet_aton(optarg, &p->cli_iface))
+      if (!inet_aton(optarg, &p->cli_iface))
         printf("Wrong CLI iface!\n");
+    break;
+    case 7:
+      strncpy(p->bdprefix, sizeof(p->bdprefix), optarg);
     break;
   }
   return 0;
@@ -636,7 +643,7 @@ void dm_json_print(char *objname, json_object *jobj)
       break;
       default:;
     }
-    DBGL(2, "'%s': key:'%s' val:'%s'", objname, key, vals);
+    DBGL(2, "'%s': key:'%s' val:'%s' type:%i", objname, key, vals, type);
     if (type == json_type_object)
       dm_json_print(key, json_object_object_get(jobj, key));
   }
@@ -660,7 +667,7 @@ dm_json_obj_t msg_edata_items[]= {
 dm_json_obj_t msg_items[]= {
   { "cmd", json_type_string, 0 },
   { "receiver", json_type_string, 0 },
-  { "edata", json_type_object, 0 },
+  { "edata", json_type_string, 0 },
   { 0, 0, 0 }
 };
 
@@ -704,25 +711,103 @@ json_object * dm_json_mkanswer(uint16_t code, char *text)
   return answer_o;
 }
 
-int dm_do_set_event(REDIS db, int r, char *edata)
+const char *dm_get_json_str_value(json_object *req, char *name)
 {
-  DBG("r:%u ed:%s", r, edata);
-  if (credis_set(db, "qq", edata)) {
-    ERR("Can't set redis key '%s' to '%s'", edata);
+  json_object *obj = dm_json_getobj(req, name, json_type_string);
+  if (!obj)
+    return 0;
+  return json_object_get_string(obj);
+}
+
+int dm_do_set_event(REDIS db, json_object *req, json_object **ans)
+{
+  int r;
+  const char *hash, *receiver, *prefix, *dbid, *edata;
+  char *msg;
+  char s[6];
+  char key[64];
+  time_t t;
+
+  DBG("");
+
+  ctime(&t);
+
+  hash = dm_get_json_str_value(req, "hash");
+  receiver = dm_get_json_str_value(req, "receiver");
+  edata = dm_get_json_str_value(req, "edata");
+
+  if ((!hash)||(!receiver)) {
+    r=666;
+    msg="Mandatory item absent";
+    goto exit;
+  }
+
+  prefix = dm_get_json_str_value(req, "prefix");
+  if (!prefix)
+    prefix = dm_vars.prm.bdprefix;
+
+  dbid = dm_get_json_str_value(req, "select");
+  if (!dbid) {
+    snprintf(s, sizeof(s), "%u", dm_vars.prm.redisdb);
+    dbid = s;
+  }
+
+  snprintf(key, sizeof(key), "%s:%s:%u", prefix, hash, (uint16_t)t);
+  DBG("key:%s receiver:%s ", key, receiver);
+
+  if (credis_hset(db, key, "receiver", receiver)) {
+    ERR("Can't set redis key '%s' to '%s'", key, receiver);
     return 1;
   }
-  return 0;
+
+exit:
+
+  (*ans)=dm_json_mkanswer(r, msg);
+
+  return r;
 }
 
-int dm_do_get_event(REDIS db, int r, char *edata, size_t esize, int *event_type)
+int dm_do_get_event(REDIS db, json_object *req, json_object **ans)
 {
-  DBG("r:%u ed:%s", r, edata);
-  return 0;
-}
+  int r;
+  const char *receiver, *event_type;
+  const char *min_event_time, *not_modified, *hash, *prefix;
+  char *msg;
+  char s[6];
+  char key[64];
 
-int dm_do_get_event_after(REDIS db, int r, int time, char *edata, size_t esize, int *event_type)
-{
-  DBG("r:%u ed:%s", r, edata);
+  DBG("");
+
+  hash = dm_get_json_str_value(req, "hash");
+  receiver = dm_get_json_str_value(req, "receiver");
+
+  if ((!hash)||(!receiver)) {
+    r=666;
+    msg="Mandatory item absent";
+    goto exit;
+  }
+
+  min_event_time = dm_get_json_str_value(req, "min_event_time");
+  not_modified = dm_get_json_str_value(req, "not_modified");
+
+  prefix = dm_get_json_str_value(req, "prefix");
+  if (!prefix)
+    prefix = dm_vars.prm.bdprefix;
+
+  snprintf(key, sizeof(key), "%s:%s", prefix, hash);
+  /*snprintf(field, sizeof(key), "%s:%s", prefix, hash);*/
+
+
+/*
+  if (credis_hget(db, key, "", &edata)) {
+    ERR("Can't set redis key '%s'");
+    return 1;
+  }
+*/
+exit:
+
+  (*ans)=dm_json_mkanswer(r, msg);
+
   return 0;
 }
 
@@ -732,16 +817,13 @@ typedef struct str_table_item_s {
 } str_table_item_t;
 
 typedef enum
-{EV_SETEVENT, EV_GETEVENT, EV_GETEVENTNM, EV_GETEVENT_AFTER, EV_GETEVENTNM_AFTER}
+{EV_SETEVENT, EV_GETEVENT}
 event_id_t;
 
 str_table_item_t cm_str_table[]={
-  { "setEvent", EV_SETEVENT },
-  { "getEvent", EV_GETEVENT },
-  { "getEvent", EV_GETEVENTNM },
-  { "getEvent", EV_GETEVENT_AFTER },
-  { "getEvent", EV_GETEVENTNM_AFTER },
-  { 0, EV_GETEVENTNM_AFTER }
+  { "SetEvent", EV_SETEVENT },
+  { "GetEvent", EV_GETEVENT },
+  { 0, 0 }
 };
 
 int dm_find_str_table(str_table_item_t *t, char *cm)
@@ -758,9 +840,9 @@ int dm_find_str_table(str_table_item_t *t, char *cm)
 
 int dm_process_json_cmd(json_object *req, json_object **ans)
 {
-  json_object *cmd_obj=0, *edata_obj=0, *reciever_obj=0;
-  char *cmd, *edata, *msg = "OK";
-  int r=0, reciever;
+  json_object *cmd_obj=0;
+  char *cmd, *msg = "OK";
+  int r=0, receiver;
 
   if (!req) {
     msg = "Wrong JSON syntax!";
@@ -778,37 +860,25 @@ int dm_process_json_cmd(json_object *req, json_object **ans)
 
   cmd_obj = dm_json_getobj(req, "cmd", json_type_string);
   cmd = (char *)json_object_get_string(cmd_obj);
-  reciever_obj = dm_json_getobj(req, "reciever", json_type_int);
-  reciever = json_object_get_int(reciever_obj);
-  edata_obj = dm_json_getobj(req, "edata", json_type_object);
-  edata = (char *)json_object_to_json_string(edata_obj);
 
-  DBG("cmd: '%s' reciever: %u", cmd, reciever);
+  DBG("cmd: '%s'", cmd);
 
-  int cmid = dm_find_str_table(cm_str_table, cmd);
-  DBG("cmid: %u", cmid);
+  int cmid = dm_find_str_table(cm_str_table, cmd);  
 
   switch (cmid) {
     case EV_SETEVENT:
-      dm_do_set_event(dm_vars.db, reciever, edata);
+      dm_do_set_event(dm_vars.db, req, ans);
     break;
     case EV_GETEVENT:
-      dm_do_get_event(dm_vars.db, reciever, 0,0,0);
-    break;
-    case EV_GETEVENT_AFTER:
+      dm_do_get_event(dm_vars.db, req, ans);
     break;
   }    
 
 exit:
 
-  (*ans)=dm_json_mkanswer(r, msg);
-  DBG("ans %s", json_object_to_json_string(*ans))
-
-  if (edata_obj)
-    json_object_put(edata_obj);
-
-  if (reciever_obj)
-    json_object_put(reciever_obj);
+  if (!(*ans))
+    (*ans)=dm_json_mkanswer(r, msg);
+  DBG("ans %s", json_object_to_json_string(*ans));
 
   if (cmd_obj)
     json_object_put(cmd_obj);
@@ -1049,7 +1119,6 @@ void dm_fcgi_out_str_n(FCGX_Request *r, char *s)
   FCGX_PutS("</p>\r\n", r->out);
 }
 
-
 int dm_fcgi_thread_accept(void *thdata)
 {
   dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)thdata;
@@ -1112,6 +1181,9 @@ int dm_fcgi2json(char *str, int s, int e, json_object *obj)
   char *ch, c;
   json_object *o;
 
+  if (s>=e)
+    return -1;
+
   ch = strchr(&str[s], '=');
 
   if (!ch)
@@ -1158,6 +1230,7 @@ json_object *dm_qs2json(char *qs)
   while (s<l) {
 
     pc = strchr(&qs[s], '&');
+
     if (pc==qs) {
       json_object_put(obj);
       return 0;
@@ -1182,24 +1255,102 @@ json_object *dm_qs2json(char *qs)
   return obj;
 }
 
+int dm_get_cookie_value(char *cookstr, char *name, char *value)
+{
+  char *ptr1, *cookie, *n, *ptr2;
+
+  value[0]=0;
+
+  while ((cookie = strtok_r(cookstr, ";", &ptr1))) {
+    cookstr=0;
+    DBGL(4, "cookie:'%s'",cookie);
+    n = strtok_r(cookie, "=", &ptr2);
+    if (!strcmp(n, name)) {
+      strcpy(value, strtok_r(0, "=", &ptr2));
+      return 0;
+    }
+  }
+
+  return 1;
+}
+
+int dm_get_receiver_id(dm_vars_t *v, char *cookies, char **receiver)
+{
+  uint32_t u32;
+  char key[128];
+  char hash[64];
+  char *prefix=0;
+
+  DBG("cookies:'%s'",cookies);
+
+  if (dm_get_cookie_value(cookies, "PHPSSEID", hash))
+    return 1;
+
+  if (!hash[0])
+    return 1;
+
+  DBG("cookie hash: %s ", hash);
+
+  if (!prefix)
+    prefix=v->prm.bdprefix;
+
+  snprintf(key, sizeof(key), "%s:%s", prefix, hash);
+
+  if (credis_hget(v->db, key, "receiver", receiver)) {
+    ERR("Can't get key '%s' from redis", key);
+    return 1;
+  }
+
+  DBG("receiver: %s", *receiver);
+
+  if (ut_s2nl10(*receiver, &u32))
+    return 1;
+
+
+  return 0;
+}
+
 int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
 {
   FCGX_Request *r = &thd->req;
-  char * server_name=0, *query_string=0;
+  char *server_name=0, *query_string=0, *cookie=0, *receiver=0;
   char q_string[256];
-  json_object *req=0, *ans=0;
+  json_object *req=0, *ans=0, *o;
 
   #ifdef DM_DEBUG
   dm_print_fcgi_req_params(r);
   #endif
 
   server_name = FCGX_GetParam("SERVER_NAME", r->envp);
-  query_string = FCGX_GetParam("QUERY_STRING", r->envp);
+  query_string = FCGX_GetParam("QUERY_STRING", r->envp);  
+  cookie = FCGX_GetParam("HTTP_COOKIE", r->envp);
 
+  /*  get receiver from DB */
+  if (dm_get_receiver_id(v, cookie, &receiver)) {
+    ERR("Wrong or absent cookie!");
+    goto exit;
+  }
+
+  /* parse URL and convert to JSON */
   url2s(q_string, query_string);
-  req = dm_qs2json(q_string);
+  req=dm_qs2json(q_string);
+  if (!req) {
+    ERR("Wrong QUERY_STRING syntax!");
+    goto exit;
+  }
+
+  /* add cmd if not present */
+  if (!dm_get_json_str_value(req, "cmd")) {
+    o = json_object_new_string("GetEvent");
+    json_object_object_add(req, "cmd", o);
+  }
+  /* add receiver */
+  o = json_object_new_string(receiver);
+  json_object_object_add(req, "receiver", o);
 
   dm_process_json_cmd(req, &ans);
+
+exit:
 
   FCGX_GetStr(thd->buf, THREADBUFSIZE, r->in);
 
@@ -1227,7 +1378,6 @@ void *dm_fcgi_thread(void *ptr)
   dm_thread_t *th = (dm_thread_t *)ptr;
   dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)th->data;
   FCGX_Request *req = &thd->req;
-  int r;
 
   DBG("started %p", th);
 

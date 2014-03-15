@@ -799,9 +799,25 @@ int credis_set(REDIS rhnd, const char *key, const char *val)
                             key, strlen(val), val);
 }
 
+int credis_hset(REDIS rhnd, const char *key, const char * field, const char *val)
+{
+  return cr_sendfandreceive(rhnd, CR_INLINE, "HSET %s %s %s\r\n",
+                            key, field, val);
+}
+
 int credis_get(REDIS rhnd, const char *key, char **val)
 {
   int rc = cr_sendfandreceive(rhnd, CR_BULK, "GET %s\r\n", key);
+
+  if (rc == 0 && (*val = rhnd->reply.bulk) == NULL)
+    return -1;
+
+  return rc;
+}
+
+int credis_hget(REDIS rhnd, const char *key, const char * field, char **val)
+{
+  int rc = cr_sendfandreceive(rhnd, CR_BULK, "HGET %s %s\r\n", key, field);
 
   if (rc == 0 && (*val = rhnd->reply.bulk) == NULL)
     return -1;

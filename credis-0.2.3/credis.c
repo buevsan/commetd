@@ -409,6 +409,9 @@ static int cr_readln(REDIS rhnd, int start, char **line, int *idx)
   
   while (more > 0 || 
          (nl = cr_findnl(buf->data + buf->idx + start, buf->len - (buf->idx + start))) == NULL) {
+
+    DEBUG("more:%i", more);
+
     avail = buf->size - buf->len;
     if (avail < CR_BUFFER_WATERMARK || avail < more) {
       DEBUG("available buffer memory is low, get more memory");
@@ -450,6 +453,8 @@ static int cr_readln(REDIS rhnd, int start, char **line, int *idx)
 static int cr_receivemultibulk(REDIS rhnd, char *line) 
 {
   int bnum, blen, i, rc=0, idx;
+
+  DEBUG("");
 
   bnum = atoi(line);
 
@@ -503,10 +508,15 @@ static int cr_receivebulk(REDIS rhnd, char *line)
     rhnd->reply.bulk = NULL; /* key didn't exist */
     return 0;
   }
+
+  DEBUG("");
+
   if (cr_readln(rhnd, blen, &line, NULL) >= 0) {
     rhnd->reply.bulk = line;
     return 0;
   }
+
+  DEBUG("");
 
   return CREDIS_ERR_PROTOCOL;
 }
@@ -531,31 +541,38 @@ static int cr_receiveerror(REDIS rhnd, char *line)
 
 static int cr_receivereply(REDIS rhnd, char recvtype) 
 {
+  int r;
   char *line, prefix=0;
 
   /* reset common send/receive buffer */
   rhnd->buf.len = 0;
   rhnd->buf.idx = 0;
 
-  if (cr_readln(rhnd, 0, &line, NULL) > 0) {
+  DEBUG("");
+
+  r = cr_readln(rhnd, 0, &line, NULL);
+  if ( r > 0) {
     prefix = *(line++);
  
     if (prefix != recvtype && prefix != CR_ERROR)
       return CREDIS_ERR_PROTOCOL;
 
+    DEBUG("prefix '%c'", prefix);
     switch(prefix) {
-    case CR_ERROR:
-      return cr_receiveerror(rhnd, line);
-    case CR_INLINE:
-      return cr_receiveinline(rhnd, line);
-    case CR_INT:
-      return cr_receiveint(rhnd, line);
-    case CR_BULK:
-      return cr_receivebulk(rhnd, line);
-    case CR_MULTIBULK:
-      return cr_receivemultibulk(rhnd, line);
-    }   
-  }
+      case CR_ERROR:
+        return cr_receiveerror(rhnd, line);
+      case CR_INLINE:
+        return cr_receiveinline(rhnd, line);
+      case CR_INT:
+        return cr_receiveint(rhnd, line);
+      case CR_BULK:
+        return cr_receivebulk(rhnd, line);
+      case CR_MULTIBULK:
+        return cr_receivemultibulk(rhnd, line);
+    }
+
+  } else
+    DEBUG("cr_readln ret: %i",r);
 
   return CREDIS_ERR_RECV;
 }
@@ -602,6 +619,8 @@ static int cr_sendandreceive(REDIS rhnd, char recvtype)
   DEBUG("Sending message: len=%d, data=%s", rhnd->buf.len, rhnd->buf.data);
 
   rc = cr_senddata(rhnd->fd, rhnd->timeout, rhnd->buf.data, rhnd->buf.len);
+
+  DEBUG("QQQQQQQQ rc:%i", rc);
 
   if (rc != rhnd->buf.len) {
     if (rc < 0)
@@ -818,6 +837,16 @@ int credis_get(REDIS rhnd, const char *key, char **val)
 int credis_hget(REDIS rhnd, const char *key, const char * field, char **val)
 {
   int rc = cr_sendfandreceive(rhnd, CR_BULK, "HGET %s %s\r\n", key, field);
+
+  if (rc == 0 && (*val = rhnd->reply.bulk) == NULL)
+    return -1;
+
+  return rc;
+}
+
+int credis_hgetall(REDIS rhnd, const char *key, char **val)
+{
+  int rc = cr_sendfandreceive(rhnd, CR_BULK, "HGETALL %s\r\n", key);
 
   if (rc == 0 && (*val = rhnd->reply.bulk) == NULL)
     return -1;

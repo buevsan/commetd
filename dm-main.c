@@ -148,6 +148,34 @@ dm_vars_t dm_vars;
 #define DBGL(l, ...)
 #endif
 
+#define ERR_OK 0
+#define ERR_WRONG_SYNTAX  1
+#define ERR_WRONG_MANDATORY_ITEM 2
+#define ERR_DATABASE  3
+#define ERR_UNKNOWN_COMMAND  4
+
+typedef struct {
+  int code;
+  char *msg;
+} err_table_item_t;
+
+err_table_item_t dm_err_table[] = {
+  { ERR_OK, "OK" },
+  { ERR_WRONG_SYNTAX, "Wrong syntax"},
+  { ERR_WRONG_MANDATORY_ITEM, "Wrong or absent mandatory item"},
+  { ERR_DATABASE, "Database operation failed"},
+  { ERR_UNKNOWN_COMMAND, "Unknown command"}
+};
+
+char *dm_get_err_msg(int code)
+{
+  int i;
+  for (i=0; i<sizeof(dm_err_table)/sizeof(err_table_item_t);++i)
+    if (dm_err_table[i].code == code)
+      return dm_err_table[i].msg;
+  return "Unknown error";
+}
+
 void dm_init_thpool(dm_thpool_t *ta, void* (*th_fun)(void*), uint8_t type, dm_th_pipe_t *p, uint16_t max)
 {
   ta->cnt=0;
@@ -442,7 +470,7 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
         printf("Wrong CLI iface!\n");
     break;
     case 7:
-      strncpy(p->bdprefix, sizeof(p->bdprefix), optarg);
+      strncpy(p->bdprefix, optarg, sizeof(p->bdprefix));
     break;
   }
   return 0;
@@ -664,10 +692,27 @@ dm_json_obj_t msg_edata_items[]= {
   { 0, 0, 0 }
 };
 
-dm_json_obj_t msg_items[]= {
+dm_json_obj_t gen_items[]= {
   { "cmd", json_type_string, 0 },
+  { "interface", json_type_string, 0 },
+  { 0, 0, 0 }
+};
+
+dm_json_obj_t create_user_items[]= {
+  { "hash", json_type_string, 0 },
   { "receiver", json_type_string, 0 },
+  { 0, 0, 0 }
+};
+
+dm_json_obj_t set_event_items[]= {
+  { "receiver", json_type_string, 0 },
+  { "event_type", json_type_string, 0 },
   { "edata", json_type_string, 0 },
+  { 0, 0, 0 }
+};
+
+dm_json_obj_t get_event_items[]= {
+  { "receiver", json_type_string, 0 },
   { 0, 0, 0 }
 };
 
@@ -698,7 +743,7 @@ int dm_json_check(json_object *obj, dm_json_obj_t *table)
   return 0;
 }
 
-json_object * dm_json_mkanswer(uint16_t code, char *text)
+json_object * dm_mk_jsonanswer_text(int code, char *text)
 {
   json_object * answer_o = json_object_new_object();
   json_object * code_o = json_object_new_int(code);
@@ -711,6 +756,11 @@ json_object * dm_json_mkanswer(uint16_t code, char *text)
   return answer_o;
 }
 
+json_object * dm_mk_jsonanswer(int code)
+{
+  return dm_mk_jsonanswer_text(code, dm_get_err_msg(code));
+}
+
 const char *dm_get_json_str_value(json_object *req, char *name)
 {
   json_object *obj = dm_json_getobj(req, name, json_type_string);
@@ -719,11 +769,10 @@ const char *dm_get_json_str_value(json_object *req, char *name)
   return json_object_get_string(obj);
 }
 
-int dm_do_set_event(REDIS db, json_object *req, json_object **ans)
+int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
 {
   int r;
   const char *hash, *receiver, *prefix, *dbid, *edata;
-  char *msg;
   char s[6];
   char key[64];
   time_t t;
@@ -732,19 +781,17 @@ int dm_do_set_event(REDIS db, json_object *req, json_object **ans)
 
   ctime(&t);
 
-  hash = dm_get_json_str_value(req, "hash");
-  receiver = dm_get_json_str_value(req, "receiver");
-  edata = dm_get_json_str_value(req, "edata");
-
-  if ((!hash)||(!receiver)) {
-    r=666;
-    msg="Mandatory item absent";
+  if (dm_json_check(req, create_user_items)) {
+    r=ERR_WRONG_MANDATORY_ITEM;
     goto exit;
   }
 
+  hash = dm_get_json_str_value(req, "hash");
+  receiver = dm_get_json_str_value(req, "receiver");
+
   prefix = dm_get_json_str_value(req, "prefix");
   if (!prefix)
-    prefix = dm_vars.prm.bdprefix;
+    prefix = v->prm.bdprefix;
 
   dbid = dm_get_json_str_value(req, "select");
   if (!dbid) {
@@ -752,109 +799,170 @@ int dm_do_set_event(REDIS db, json_object *req, json_object **ans)
     dbid = s;
   }
 
-  snprintf(key, sizeof(key), "%s:%s:%u", prefix, hash, (uint16_t)t);
+  snprintf(key, sizeof(key), "%s:%s", prefix, hash);
   DBG("key:%s receiver:%s ", key, receiver);
 
-  if (credis_hset(db, key, "receiver", receiver)) {
+  if (credis_hset(v->db, key, "receiver", receiver)) {
+    r = ERR_DATABASE;
     ERR("Can't set redis key '%s' to '%s'", key, receiver);
+    goto exit;
+  }
+  snprintf(key, sizeof(key), "%s:r%s", receiver);
+  if (credis_hset(v->db, key, "hash", hash)) {
+    r = ERR_DATABASE;
+    ERR("hset");
+    goto exit;
+  }
+  if (credis_hset(v->db, key, "prefix", prefix)) {
+    r = ERR_DATABASE;
+    ERR("hset");
+    goto exit;
+  }
+
+exit:
+
+  (*ans)=dm_mk_jsonanswer(r);
+
+  return r;
+}
+
+int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
+{
+  int r;
+  const char *receiver, *prefix, *dbid, *edata;
+  char s[6];
+  char key[64];
+  time_t t;
+
+  DBG("");
+
+  ctime(&t);
+
+  if (dm_json_check(req, set_event_items)) {
+    r=ERR_WRONG_MANDATORY_ITEM;
+    goto exit;
+  }
+
+  receiver = dm_get_json_str_value(req, "receiver");
+  edata = dm_get_json_str_value(req, "edata");
+
+  prefix = dm_get_json_str_value(req, "prefix");
+  if (!prefix)
+    prefix = v->prm.bdprefix;
+
+  dbid = dm_get_json_str_value(req, "select");
+  if (!dbid) {
+    snprintf(s, sizeof(s), "%u", dm_vars.prm.redisdb);
+    dbid = s;
+  }
+
+  snprintf(key, sizeof(key), "%s:r%s", prefix, receiver);
+  snprintf(time, sizeof(time), "%u", (u_int32_t)t);
+
+  DBG("key:%s ", key);
+
+  if (credis_hset(v->db, key, time, edata)) {
+    r = ERR_DATABASE;
+    ERR("Can't set redis key '%s' field '%s'", key, time);
     return 1;
   }
 
 exit:
 
-  (*ans)=dm_json_mkanswer(r, msg);
+  (*ans)=dm_mk_jsonanswer(r);
 
   return r;
 }
 
-int dm_do_get_event(REDIS db, json_object *req, json_object **ans)
+
+int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 {
-  int r;
+  int r=0;
   const char *receiver, *event_type;
   const char *min_event_time, *not_modified, *hash, *prefix;
-  char *msg;
-  char s[6];
   char key[64];
+  char data[256];
 
   DBG("");
 
-  hash = dm_get_json_str_value(req, "hash");
-  receiver = dm_get_json_str_value(req, "receiver");
-
-  if ((!hash)||(!receiver)) {
-    r=666;
-    msg="Mandatory item absent";
+  if (dm_json_check(req, get_event_items)) {
+    r=ERR_WRONG_MANDATORY_ITEM;
     goto exit;
   }
+
+  receiver = dm_get_json_str_value(req, "receiver");
 
   min_event_time = dm_get_json_str_value(req, "min_event_time");
   not_modified = dm_get_json_str_value(req, "not_modified");
 
   prefix = dm_get_json_str_value(req, "prefix");
   if (!prefix)
-    prefix = dm_vars.prm.bdprefix;
+    prefix = v->prm.bdprefix;
 
-  snprintf(key, sizeof(key), "%s:%s", prefix, hash);
+  snprintf(key, sizeof(key), "%s:r%s", prefix, receiver);
+
   /*snprintf(field, sizeof(key), "%s:%s", prefix, hash);*/
 
-
-/*
-  if (credis_hget(db, key, "", &edata)) {
-    ERR("Can't set redis key '%s'");
-    return 1;
+  if (credis_hgetall(v->db, key, &data)) {
+    r=ERR_DATABASE;
+    ERR("Can't get redis key '%s'", key);
+    goto exit;
   }
-*/
+
+  DBG("data:'%s'", data);
+
 exit:
 
-  (*ans)=dm_json_mkanswer(r, msg);
+  (*ans)=dm_mk_jsonanswer(r);
 
-  return 0;
+  return r;
 }
 
-typedef struct str_table_item_s {
+typedef int (*do_cmd_funt_t)(dm_vars_t *, json_object *, json_object**);
+
+typedef struct {
   char *name;
+  do_cmd_funt_t do_cmd;
   uint8_t id;
-} str_table_item_t;
+} json_cmd_table_item_t;
 
 typedef enum
-{EV_SETEVENT, EV_GETEVENT}
+{EV_SETEVENT, EV_GETEVENT, EV_CREATEUSER}
 event_id_t;
 
-str_table_item_t cm_str_table[]={
-  { "SetEvent", EV_SETEVENT },
-  { "GetEvent", EV_GETEVENT },
+json_cmd_table_item_t cm_str_table[]={
+  { "SetEvent", dm_do_set_event, EV_SETEVENT },
+  { "GetEvent", dm_do_get_event, EV_GETEVENT },
+  { "CreateUser", dm_do_create_user, EV_CREATEUSER },
   { 0, 0 }
 };
 
-int dm_find_str_table(str_table_item_t *t, char *cm)
+json_cmd_table_item_t *dm_find_json_cmd(json_cmd_table_item_t *t, char *cm)
 {
   int i = 0;
   while (t[i].name) {
     if (!strcmp(cm, t[i].name))
-      return i;
+      return &t[i];
     i++;
   }
-  return -1;
+  return 0;
 }
-
 
 int dm_process_json_cmd(json_object *req, json_object **ans)
 {
   json_object *cmd_obj=0;
-  char *cmd, *msg = "OK";
-  int r=0, receiver;
+  char *cmd;
+  int r=0;
 
   if (!req) {
-    msg = "Wrong JSON syntax!";
-    r = 666;
+    r = ERR_WRONG_SYNTAX;
     goto exit;
   }
 
   dm_json_print("", req);
 
-  if (dm_json_check(req, msg_items)) {
-    msg="Wrong JSON message!";
-    r = 999;
+  if (dm_json_check(req, gen_items)) {
+    r = ERR_WRONG_MANDATORY_ITEM;
     goto exit;
   }
 
@@ -863,21 +971,19 @@ int dm_process_json_cmd(json_object *req, json_object **ans)
 
   DBG("cmd: '%s'", cmd);
 
-  int cmid = dm_find_str_table(cm_str_table, cmd);  
+  json_cmd_table_item_t *cm = dm_find_json_cmd(cm_str_table, cmd);
 
-  switch (cmid) {
-    case EV_SETEVENT:
-      dm_do_set_event(dm_vars.db, req, ans);
-    break;
-    case EV_GETEVENT:
-      dm_do_get_event(dm_vars.db, req, ans);
-    break;
-  }    
+  if (!cm) {
+    r=ERR_UNKNOWN_COMMAND;
+    goto exit;
+  }
+
+  cm->do_cmd(&dm_vars, req, ans);
 
 exit:
 
   if (!(*ans))
-    (*ans)=dm_json_mkanswer(r, msg);
+    (*ans)=dm_mk_jsonanswer(r);
   DBG("ans %s", json_object_to_json_string(*ans));
 
   if (cmd_obj)
@@ -889,9 +995,14 @@ exit:
 int dm_process_json_cmd_buf(uint8_t *buf)
 {
   libdio_msg_str_cmd_r_t *rshdr = (libdio_msg_str_cmd_r_t *)buf;
-  json_object *req=0, *ans=0;
+  json_object *req=0, *ans=0, *o;
   int r;
   req = json_tokener_parse(((libdio_msg_str_cmd_t*)buf)->cmd);
+
+  /* add interface */
+  o = json_object_new_string("cli");
+  json_object_object_add(req, "interface", o);
+
   r = dm_process_json_cmd(req, &ans);
   LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), r?0xF1:0);
   json_object_put(ans);
@@ -1281,6 +1392,9 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, char **receiver)
   char hash[64];
   char *prefix=0;
 
+  if (!cookies)
+    return 1;
+
   DBG("cookies:'%s'",cookies);
 
   if (dm_get_cookie_value(cookies, "PHPSSEID", hash))
@@ -1344,9 +1458,14 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
     o = json_object_new_string("GetEvent");
     json_object_object_add(req, "cmd", o);
   }
+
   /* add receiver */
   o = json_object_new_string(receiver);
   json_object_object_add(req, "receiver", o);
+
+  /* add interface */
+  o = json_object_new_string("fcgi");
+  json_object_object_add(req, "interface", o);
 
   dm_process_json_cmd(req, &ans);
 
@@ -1362,9 +1481,9 @@ exit:
   FCGX_PutS(thd->buf, r->out);
   FCGX_PutS("</p>", r->out);
 
- /* FCGX_PutS("<p> ANSWER: ", r->out);
+  FCGX_PutS("<p> ANSWER: ", r->out);
   FCGX_PutS(json_object_to_json_string(ans), r->out);
-  FCGX_PutS("</p>", r->out);*/
+  FCGX_PutS("</p>", r->out);
   dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
 
   json_object_put(req);

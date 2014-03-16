@@ -220,6 +220,7 @@ int credis_get(REDIS rhnd, const char *key, char **val);
 /* returns -1 if the key doesn't exists */
 int credis_hset(REDIS rhnd, const char *key, const char *field,  const char *val);
 int credis_hget(REDIS rhnd, const char *key, const char *field,  char **val);
+int credis_hgetall(REDIS rhnd, const char *key, char **val);
 
 /* returns -1 if the key doesn't exists */
 int credis_getset(REDIS rhnd, const char *key, const char *set_val, char **get_val);

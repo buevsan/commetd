@@ -14,7 +14,7 @@
 #include <sys/wait.h>
 #include <time.h>
 
-#include "credis/credis.h"
+#include <hiredis/hiredis.h>
 #include <fcgi_config.h>
 #include <fcgiapp.h>
 #include <json/json.h>
@@ -38,6 +38,7 @@ typedef struct dm_prm_s
   struct in_addr fcgi_iface;
   uint16_t maxths;
   uint16_t minths;
+  uint16_t event_timer;
   int redisdb;
   char bdprefix[33];
   union {
@@ -116,7 +117,8 @@ typedef struct dm_vars_s
 {
   dm_prm_t prm;
   dm_state_t st;
-  REDIS db;  
+  redisContext *rdCtx;
+  redisReply *rdReply;
   int fcgi_fd;  
   int cli_fd;
   dbg_desc_t dbg;
@@ -153,6 +155,7 @@ dm_vars_t dm_vars;
 #define ERR_WRONG_MANDATORY_ITEM 2
 #define ERR_DATABASE  3
 #define ERR_UNKNOWN_COMMAND  4
+#define ERR_TIMEOUT  4
 
 typedef struct {
   int code;
@@ -164,7 +167,8 @@ err_table_item_t dm_err_table[] = {
   { ERR_WRONG_SYNTAX, "Wrong syntax"},
   { ERR_WRONG_MANDATORY_ITEM, "Wrong or absent mandatory item"},
   { ERR_DATABASE, "Database operation failed"},
-  { ERR_UNKNOWN_COMMAND, "Unknown command"}
+  { ERR_UNKNOWN_COMMAND, "Unknown command"},
+  { ERR_TIMEOUT, "Operation timeout"}
 };
 
 char *dm_get_err_msg(int code)
@@ -244,6 +248,8 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.minths = 1;
   v->prm.maxths = MAXCLIENTS;
   v->prm.redisdb = 3;
+  v->prm.redisport = 6379;
+  v->prm.event_timer = 5;
   strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
 
   dm_init_th_pipe(&v->thpipe);
@@ -299,14 +305,23 @@ int dm_init(dm_vars_t *v)
   if (v->prm.redisaddr.s_addr)
     s=inet_ntoa(v->prm.redisaddr);
   DBGL(2, "Connecting to REDIS '%s':%u...", s?s:"127.0.0.1", v->prm.redisport);
-  v->db = credis_connect(0, v->prm.redisport, 20000);
-  if (!v->db) {
-    ERR("Can't connect to redis!");
-    /*return -1;*/
-  }  
-  if (credis_select(v->db, v->prm.redisdb)) {
+
+  struct timeval timeout = { 1, 500000 };
+  v->rdCtx = redisConnectWithTimeout(s?s:"127.0.0.1", v->prm.redisport, timeout);
+  if ((!v->rdCtx) || (v->rdCtx->err)) {
     ERR("Can't connect to db '%i'!", v->prm.redisdb);
+    return -1;
   }
+
+  v->rdReply = redisCommand(v->rdCtx, "select %i", v->prm.redisdb);
+  if (!v->rdReply) {
+    ERR("Can't select db '%i'!", v->prm.redisdb);
+    return -1;
+  }
+  freeReplyObject(v->rdReply);
+
+
+
 
   /* open cli socket */
   struct sockaddr_in sa;
@@ -769,10 +784,12 @@ const char *dm_get_json_str_value(json_object *req, char *name)
   return json_object_get_string(obj);
 }
 
+
+
 int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
 {
-  int r;
-  const char *hash, *receiver, *prefix, *dbid, *edata;
+  int r=0;
+  const char *hash, *receiver, *prefix, *dbid;
   char s[6];
   char key[64];
   time_t t;
@@ -802,22 +819,23 @@ int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
   snprintf(key, sizeof(key), "%s:%s", prefix, hash);
   DBG("key:%s receiver:%s ", key, receiver);
 
-  if (credis_hset(v->db, key, "receiver", receiver)) {
+
+  v->rdReply = redisCommand(v->rdCtx, "hset %s receiver %s", key, receiver);
+  if (!v->rdReply) {
     r = ERR_DATABASE;
     ERR("Can't set redis key '%s' to '%s'", key, receiver);
     goto exit;
   }
-  snprintf(key, sizeof(key), "%s:r%s", receiver);
-  if (credis_hset(v->db, key, "hash", hash)) {
+  freeReplyObject(v->rdReply);
+
+  snprintf(key, sizeof(key), "%s:r%s", prefix, receiver);
+  v->rdReply = redisCommand(v->rdCtx, "hset %s hash %s", key, hash);
+  if (!v->rdReply) {
     r = ERR_DATABASE;
-    ERR("hset");
+    ERR("Can't set redis key '%s' to '%s'", key, hash);
     goto exit;
   }
-  if (credis_hset(v->db, key, "prefix", prefix)) {
-    r = ERR_DATABASE;
-    ERR("hset");
-    goto exit;
-  }
+  freeReplyObject(v->rdReply);
 
 exit:
 
@@ -826,12 +844,33 @@ exit:
   return r;
 }
 
+void dm_add_json_string(json_object *o, const char *key, const char *value)
+{
+  json_object *no = json_object_new_string(value);
+  json_object_object_add(o, key, no);
+}
+
+json_object *dm_mk_event_record(const char *event_time, const char *event_type,
+                                const char *receiver, const char *recieved, const char *edata)
+{
+  json_object *o = json_object_new_object();
+  dm_add_json_string(o, "event_time", event_time);
+  dm_add_json_string(o, "event_type", event_type);
+  dm_add_json_string(o, "receiver", receiver);
+  dm_add_json_string(o, "recieved", recieved);
+  dm_add_json_string(o, "edata", edata);
+  return o;
+}
+
 int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
 {
   int r;
-  const char *receiver, *prefix, *dbid, *edata;
-  char s[6];
+  const char *receiver, *prefix, *dbid, *edata, *event_type;
+  json_object *o=0;
+  char event_time[32];
+  char s[16];
   char key[64];
+  char value[256];
   time_t t;
 
   DBG("");
@@ -843,6 +882,7 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
     goto exit;
   }
 
+  event_type = dm_get_json_str_value(req, "event_type");
   receiver = dm_get_json_str_value(req, "receiver");
   edata = dm_get_json_str_value(req, "edata");
 
@@ -856,18 +896,27 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
     dbid = s;
   }
 
-  snprintf(key, sizeof(key), "%s:r%s", prefix, receiver);
-  snprintf(time, sizeof(time), "%u", (u_int32_t)t);
+  snprintf(event_time, sizeof(event_time), "%u", (uint32_t)t);
+  snprintf(key, sizeof(key), "%s:%s:%s", prefix, receiver, event_time);
 
-  DBG("key:%s ", key);
+  o = dm_mk_event_record(event_time, event_type, receiver, "0", edata);
+  snprintf(value, sizeof(value), "%s", json_object_to_json_string(o));
 
-  if (credis_hset(v->db, key, time, edata)) {
+  DBG("key:'%s'' val:'%s'", key, value);
+
+
+  v->rdReply = redisCommand(v->rdCtx, "set %s %s", key, value);
+  if (!v->rdReply) {
     r = ERR_DATABASE;
-    ERR("Can't set redis key '%s' field '%s'", key, time);
+    ERR("Can't set redis key '%s' value '%s'", key, value);
     return 1;
   }
+  freeReplyObject(v->rdReply);
 
 exit:
+
+  if (o)
+    json_object_put(o);
 
   (*ans)=dm_mk_jsonanswer(r);
 
@@ -875,13 +924,91 @@ exit:
 }
 
 
+int dm_compare_event_keys(const void *i1, const void *i2)
+{
+  uint32_t u1, u2;
+  u1=*((uint32_t *)i1);
+  u2=*((uint32_t *)i2);
+
+  if (u1<u2)
+    return -1;
+
+  if (u1>u2)
+    return 1;
+
+  return 0;
+}
+
+int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver, uint32_t *item, uint16_t *cnt)
+{
+  int r=0;
+  uint16_t i;
+  char key[64];
+  snprintf(key, sizeof(key), "%s:%s:*", prefix, receiver);
+
+
+  v->rdReply = redisCommand(v->rdCtx, "keys %s ", key);
+  if (!v->rdReply) {
+    r=ERR_DATABASE;
+    ERR("Can't get redis keys '%s'", key);
+    goto exit;
+  }
+
+  DBG("redis reply: t:%i e:%i", v->rdReply->type, v->rdReply->elements);
+  (*cnt) = ((*cnt) < v->rdReply->elements)?(*cnt):v->rdReply->elements;
+
+
+  redisReply *reply;
+  char *c;
+
+  for (i=0; i<(*cnt); ++i) {
+    reply = v->rdReply->element[i];
+    DBG("event_key: '%s'", reply->str);
+    c = strrchr(reply->str, ':');
+    if (!c)
+      continue;
+    item[i]=(uint32_t)strtoul(c+1, 0, 10);
+  }
+
+  if ((*cnt)>1)
+    qsort(item, (*cnt), 4, dm_compare_event_keys);
+
+  for (i=0; i<(*cnt); ++i)
+    DBG("event_time: '%u'", item[i]);
+
+exit:
+
+  if (v->rdReply)
+    freeReplyObject(v->rdReply);
+
+  return r;
+}
+
+uint32_t *dm_find_event(uint32_t *item, uint16_t cnt, uint32_t min)
+{
+  uint16_t i;
+  if (!cnt)
+    return 0;
+
+  if (!min)
+    return &item[0];
+
+  for (i=0;i<cnt;++i)
+    if (item[i]>=min)
+      return &item[i];
+
+  return 0;
+}
+
 int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 {
   int r=0;
-  const char *receiver, *event_type;
-  const char *min_event_time, *not_modified, *hash, *prefix;
-  char key[64];
-  char data[256];
+  const char *receiver;
+  const char *min_event_time, *not_modified, *prefix;
+  json_object *event_data_o=0;
+  uint32_t nkeys[200], *u32, mintime;
+  uint16_t cnt;
+  time_t st,t;
 
   DBG("");
 
@@ -899,21 +1026,77 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   if (!prefix)
     prefix = v->prm.bdprefix;
 
-  snprintf(key, sizeof(key), "%s:r%s", prefix, receiver);
 
-  /*snprintf(field, sizeof(key), "%s:%s", prefix, hash);*/
+  ctime(&st);
 
-  if (credis_hgetall(v->db, key, &data)) {
-    r=ERR_DATABASE;
-    ERR("Can't get redis key '%s'", key);
+  do {
+
+    cnt = sizeof(nkeys)>>2;
+    r = dm_get_all_events(v, prefix, receiver, nkeys, &cnt);
+    if (r)
+      goto exit;
+
+    mintime=0;
+    if (min_event_time) {
+      if (ut_s2nl10(min_event_time, &mintime)) {
+        ERR("Wrong min_event_time!");
+        goto exit;
+      }
+    }
+
+    u32 = dm_find_event(nkeys, cnt, mintime);
+
+    ctime(&t);
+
+  } while ((!u32) && ((t-st) < v->prm.event_timer));
+
+  if (!u32) {
+    r = ERR_TIMEOUT;
     goto exit;
   }
 
-  DBG("data:'%s'", data);
+  DBG("found event_time %u", *u32);
+
+  v->rdReply = redisCommand(v->rdCtx, "get %s:%s:%u ", prefix, receiver,*u32);
+  if (!v->rdReply) {
+    r = ERR_DATABASE;
+    ERR("Can't get founded event");
+    goto exit;
+  }
+
+  if (v->rdReply->type!=REDIS_REPLY_STRING) {
+    r = ERR_DATABASE;
+    ERR("Event data not a string %i", v->rdReply->type);
+    freeReplyObject(v->rdReply);
+    goto exit;
+  }
+
+  event_data_o = json_tokener_parse(v->rdReply->str);
+  freeReplyObject(v->rdReply);
+
+  if (!not_modified) {
+    json_object_object_del(event_data_o, "received");
+    dm_add_json_string(event_data_o, "received", "1");
+
+    v->rdReply = redisCommand(v->rdCtx, "set %s:%s:%u '%s'", prefix, receiver, *u32,
+                             json_object_to_json_string(event_data_o));
+
+    if (!v->rdReply) {
+      ERR("Can't update event record");
+      r= ERR_DATABASE;
+      goto exit;
+    }
+
+    freeReplyObject(v->rdReply);
+  }
+
 
 exit:
 
   (*ans)=dm_mk_jsonanswer(r);
+
+  if (event_data_o)
+    json_object_object_add((*ans), "event_data", event_data_o);
 
   return r;
 }
@@ -1000,11 +1183,16 @@ int dm_process_json_cmd_buf(uint8_t *buf)
   req = json_tokener_parse(((libdio_msg_str_cmd_t*)buf)->cmd);
 
   /* add interface */
-  o = json_object_new_string("cli");
-  json_object_object_add(req, "interface", o);
+
+  if (req) {
+   o = json_object_new_string("cli");
+   json_object_object_add(req, "interface", o);
+  }
 
   r = dm_process_json_cmd(req, &ans);
+
   LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), r?0xF1:0);
+
   json_object_put(ans);
   json_object_put(req);
   return 0;
@@ -1306,7 +1494,8 @@ int dm_fcgi2json(char *str, int s, int e, json_object *obj)
   str[e+1]=0;
   DBG("'%s':'%s'", &str[s], &str[m+1]);
 
-  switch (dm_getjsontype(&str[m+1])) {
+  switch (66) {
+/*  switch (dm_getjsontype(&str[m+1])) {*/
     case json_type_int:
       o = json_object_new_int(strtoul(&str[m+1],0,10));
     break;
@@ -1385,9 +1574,8 @@ int dm_get_cookie_value(char *cookstr, char *name, char *value)
   return 1;
 }
 
-int dm_get_receiver_id(dm_vars_t *v, char *cookies, char **receiver)
+int dm_get_receiver_id(dm_vars_t *v, char *cookies, uint32_t *receiverid)
 {
-  uint32_t u32;
   char key[128];
   char hash[64];
   char *prefix=0;
@@ -1410,16 +1598,26 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, char **receiver)
 
   snprintf(key, sizeof(key), "%s:%s", prefix, hash);
 
-  if (credis_hget(v->db, key, "receiver", receiver)) {
+
+  v->rdReply = redisCommand(v->rdCtx, "hget %s receiver", key);
+  if (!v->rdReply) {
     ERR("Can't get key '%s' from redis", key);
     return 1;
   }
 
-  DBG("receiver: %s", *receiver);
-
-  if (ut_s2nl10(*receiver, &u32))
+  if (v->rdReply->type != REDIS_REPLY_STRING) {
+    ERR("Not string receiver id %i", v->rdReply->type);
+    freeReplyObject(v->rdReply);
     return 1;
+  }
 
+  if (ut_s2nl10(v->rdReply->str, receiverid)) {
+    ERR("Wrong receiver id");
+    freeReplyObject(v->rdReply);
+    return 1;
+  }
+
+  freeReplyObject(v->rdReply);
 
   return 0;
 }
@@ -1427,8 +1625,10 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, char **receiver)
 int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
 {
   FCGX_Request *r = &thd->req;
-  char *server_name=0, *query_string=0, *cookie=0, *receiver=0;
+  char *server_name=0, *query_string=0, *cookie=0;
+  uint32_t receiverid;
   char q_string[256];
+  char receiver[32];
   json_object *req=0, *ans=0, *o;
 
   #ifdef DM_DEBUG
@@ -1440,10 +1640,11 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   cookie = FCGX_GetParam("HTTP_COOKIE", r->envp);
 
   /*  get receiver from DB */
-  if (dm_get_receiver_id(v, cookie, &receiver)) {
+  if (dm_get_receiver_id(v, cookie, &receiverid)) {
     ERR("Wrong or absent cookie!");
     goto exit;
-  }
+  }  
+  snprintf(receiver, sizeof(receiver), "%u", receiverid);
 
   /* parse URL and convert to JSON */
   url2s(q_string, query_string);

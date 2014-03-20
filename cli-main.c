@@ -248,7 +248,7 @@ int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
   libdio_msg_str_cmd_t *hdr=(libdio_msg_str_cmd_t *)buf;
   hdr->hdr.code = htons((!json)?LIBDIO_MSG_STR_CMD:LIBDIO_MSG_JSON_CMD);
   hdr->hdr.len = htons(strlen(command)+1);
-  strncpy(hdr->cmd, command, 64);
+  strncpy(hdr->cmd, command, bufsize-sizeof(libdio_msg_hdr_t));
 
   libdio_write_message(fd, buf);
 
@@ -287,6 +287,7 @@ error:
 
 int cli_mk_command(cli_vars_t *v)
 {
+  DBG("cm: %s", v->prm.cm);
   return cli_execute_cm(v->fd, v->buf, CMBUFSIZE, v->prm.cm, v->prm.json);
 }
 

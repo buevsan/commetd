@@ -1,18 +1,12 @@
 CFLAGS+=-I. -I credis -DDM_DEBUG -DCLI_DEBUG -Wall
-LIBS=-ljson-c -lfcgi -lfcgi -lpthread -lcredis
-LDFLAGS+=-L./credis 
-
-LIBCREDIS=credis/libcredis.so
+LIBS=-ljson-c -lfcgi -lfcgi -lpthread -lhiredis
 
 %: %.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<  $(LIBS)
 
 all: commetd commet-cli
 
-$(LIBCREDIS): 
-	make  -C credis
-
-commetd: $(LIBCREDIS) dm-main.o utils.o debug.o libdio.o
+commetd: dm-main.o utils.o debug.o libdio.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o commetd $^ $(LIBS)
 
 commet-cli: cli-main.o utils.o debug.o libdio.o 	
@@ -21,9 +15,7 @@ commet-cli: cli-main.o utils.o debug.o libdio.o
 
 clean:
 	rm commetd commet-cli
-	rm -f *.o
-	make -C credis clean
-       	
+	rm -f *.o       	
 	 
 
 dist-clean: clean

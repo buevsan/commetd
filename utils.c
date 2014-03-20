@@ -12,7 +12,7 @@ void ut_mac2s(uint8_t * mac, char *s)
   sprintf(&s[15], "%02X", (uint16_t)mac[5]);
 }
 
-int ut_s2n16(char *s, uint16_t *n)
+int ut_s2n16(const char *s, uint16_t *n)
 {
   uint8_t i=0;
   while (s[i])
@@ -23,7 +23,7 @@ int ut_s2n16(char *s, uint16_t *n)
   return 0;
 }
 
-int ut_s2nl16(char *s, uint32_t *n)
+int ut_s2nl16(const char *s, uint32_t *n)
 {
   uint8_t i=0;
   while (s[i])
@@ -92,7 +92,7 @@ int ut_s2mac(uint8_t * mac, char *s)
 
 }
 
-int ut_s2n10(char *s, uint16_t *n)
+int ut_s2n10(const char *s, uint16_t *n)
 {
   uint8_t i=0;
   while (s[i])
@@ -103,7 +103,7 @@ int ut_s2n10(char *s, uint16_t *n)
   return 0;
 }
 
-int ut_s2nl10(char *s, uint32_t *n)
+int ut_s2nl10(const char *s, uint32_t *n)
 {
   uint8_t i=0;
   while (s[i])

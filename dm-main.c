@@ -1057,7 +1057,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   DBG("found event_time %u", *u32);
 
-  v->rdReply = redisCommand(v->rdCtx, "get %s:%s:%u ", prefix, receiver,*u32);
+  v->rdReply = redisCommand(v->rdCtx, "get %s:%s:%u ", prefix, receiver, *u32);
   if (!v->rdReply) {
     r = ERR_DATABASE;
     ERR("Can't get founded event");
@@ -1072,6 +1072,13 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   }
 
   event_data_o = json_tokener_parse(v->rdReply->str);
+  if (event_data_o) {
+    freeReplyObject(v->rdReply);
+    r=ERR_DATABASE;
+    ERR("Database has record with wrong syntax");
+    goto exit;
+  }
+
   freeReplyObject(v->rdReply);
 
   if (!not_modified) {

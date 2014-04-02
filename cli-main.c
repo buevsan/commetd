@@ -238,7 +238,7 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
 int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
 {
   int r;
-  int timeout=500;
+  int timeout=5000;
 
   DBG("%s", command);
 

@@ -8,22 +8,22 @@
 typedef struct {
   uint16_t len;
   uint16_t code;
-} libdio_msg_hdr_t;
+} __attribute__((packed)) libdio_msg_hdr_t;
 
 typedef struct {
   libdio_msg_hdr_t hdr;
   uint8_t status;
-} libdio_msg_response_hdr_t;
+} __attribute__((packed)) libdio_msg_response_hdr_t;
 
 typedef struct {
   libdio_msg_hdr_t hdr;
   char cmd[1];
-} libdio_msg_str_cmd_t;
+} __attribute__((packed)) libdio_msg_str_cmd_t;
 
 typedef struct {
   libdio_msg_response_hdr_t rhdr;
   char response[1];
-} libdio_msg_str_cmd_r_t;
+} __attribute__((packed)) libdio_msg_str_cmd_r_t;
 
 typedef int (*libdio_str_cmd_handler_t)(int, char **,  void *);
 
@@ -53,7 +53,7 @@ int libdio_setnonblock(int fd, uint8_t en);
 #define LIBDIO_FILLRESPONSE(rhdr, ln, cod, sts) \
    rhdr->status = sts; \
    rhdr->hdr.code = htons(cod | LIBDIO_MSG_RESPONSE); \
-   rhdr->hdr.len = htons(ln);
+   rhdr->hdr.len = htons(ln+1);
 
 #define LIBDIO_FILLSTRRESPONSE(rshdr, str, sts) \
    strcpy(rshdr->response, str); \

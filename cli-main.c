@@ -41,7 +41,7 @@ cli_vars_t cli_vars;
 
 #ifdef CLI_DEBUG
 #define DBGL(level, format, ...) debug_print(&cli_vars.dbg, 1+level, "DBG: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
-#define DBG(format, ...) DBGL(0, format, ##__VA_ARGS__);
+#define DBG(format, ...) DBGL(1, format, ##__VA_ARGS__);
 #else
 #define DBG(format, ...)
 #define DBGL(l, ...)

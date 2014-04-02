@@ -1384,7 +1384,7 @@ int dm_process_json_cmd_buf(uint8_t *buf)
 
   r = dm_process_json_cmd(req, &ans);
 
-  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), r?0xF1:0);
+  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), r?0xF1:0);  
 
   json_object_put(ans);
   json_object_put(req);

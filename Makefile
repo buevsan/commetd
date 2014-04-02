@@ -1,4 +1,4 @@
-CFLAGS+=-I. -I credis -DDM_DEBUG -DCLI_DEBUG -Wall
+CFLAGS+=-I. -DDM_DEBUG -DCLI_DEBUG -Wall
 LIBS=-ljson-c -lfcgi -lfcgi -lpthread -lhiredis
 
 %: %.c

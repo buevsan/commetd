@@ -4,23 +4,42 @@
 
 #define DEBUG_MSG_BUFSIZE 256
 
-int debug_init(dbg_desc_t *d, int level)
+int debug_init(dbg_desc_t *d, int level, const char *filename)
 {
   d->buf = malloc(DEBUG_MSG_BUFSIZE);
+
   if (!d->buf)
-   return -1;
-  d->file = stdout;
+   goto error;
+
+  if (filename) {
+    d->file = fopen(filename, "at+");
+    if (!d->file) {
+      fprintf(stderr, "Can't open log file: '%s'!!!\n", filename);
+      goto error;
+    }
+  } else
+    d->file = stdout;
+
   d->level = level;
   d->bufsize = DEBUG_MSG_BUFSIZE;
-  pthread_mutex_init(&d->mtx, 0);
+  pthread_mutex_init(&d->mtx, 0);  
+
   return 0;
+
+error:
+  debug_free(d);
+  return -1;
 }
 
 void debug_free(dbg_desc_t *d)
 {
-  if ((d->file) && (d->file!=stdout))
-    fclose(d->file);
-  free(d->buf);
+  if ((d->file) && (d->file!=stdout)) {
+    fflush(d->file);
+    /*fclose(d->file);*/
+  }
+
+  if (d->buf)
+    free(d->buf);
   pthread_mutex_destroy(&d->mtx);
 }
 

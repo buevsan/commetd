@@ -42,6 +42,7 @@ typedef struct dm_prm_s
   uint16_t rd_expire_timer;
   int redisdb;
   char bdprefix[33];
+  char logfilename[128];
   union {
    uint8_t foreground:1;
   };
@@ -269,10 +270,10 @@ int dm_init(dm_vars_t *v)
   char *s;
   char str[32];  
 
-  if (debug_init(&v->dbg, v->prm.dlevel))
+  if (debug_init(&v->dbg, v->prm.dlevel,
+                 (v->prm.logfilename[0])?v->prm.logfilename:0))
     return -1;
   libdio_setlog(&v->dbg);
-
 
   DBG("Initilization...");
 
@@ -339,7 +340,7 @@ int dm_init(dm_vars_t *v)
   }
   memset(&sa, 0, sizeof(sa));
   sa.sin_family = AF_INET;
-  sa.sin_addr.s_addr = htonl(v->prm.cli_iface.s_addr);
+  sa.sin_addr.s_addr = v->prm.cli_iface.s_addr;
   sa.sin_port = htons(v->prm.cliport);
 
   int yes =1;
@@ -383,6 +384,8 @@ int dm_init(dm_vars_t *v)
 
 int dm_cleanup(dm_vars_t *v)
 {
+  DBG("");
+
   dm_thpool_stop(&v->clipool);
   dm_thpool_stop(&v->fcgipool);
 
@@ -399,6 +402,8 @@ int dm_cleanup(dm_vars_t *v)
   }
 
   debug_free(&v->dbg);
+
+
 
   return 0;
 }
@@ -452,6 +457,7 @@ static struct option loptions[] = {
   {"rd-prefix", 1, 0, 0},
   {"event-expire", 1, 0, 0},
   {"event-wait", 1, 0, 0},
+  {"log", 1, 0, 0},
   {0, 0, 0, 0}
 };
 
@@ -465,7 +471,8 @@ static char * loptdesc[] = {
   "IP interface for CLI",
   "REDIS database key prefix",
   "REDIS key expire timer",
-  "Event waiting timer"
+  "Event waiting timer",
+  "Log file name"
 };
 
 void dm_print_help(void)
@@ -491,39 +498,58 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
       dm_print_help();
       return -1;
     case 1:
-      if (!inet_aton(optarg, &p->redisaddr))
+      if (!inet_aton(optarg, &p->redisaddr)) {
         printf("Wrong REDIS address!\n");
+        return 1;
+      }
     break;
     case 2:
-      if (ut_s2n10(optarg, &p->redisport))
+      if (ut_s2n10(optarg, &p->redisport)) {
         printf("Wrong port!\n");
+        return 1;
+      }
     break;
     case 3:
-      if (ut_s2n10(optarg, &p->fcgiport))
+      if (ut_s2n10(optarg, &p->fcgiport)) {
         printf("Wrong port!\n");
+        return 1;
+      }
     break;
     case 4:
-      if (ut_s2n10(optarg, &p->cliport))
+      if (ut_s2n10(optarg, &p->cliport)) {
         printf("Wrong port!\n");
+        return 1;
+      }
     break;
     case 5:
-      if (!inet_aton(optarg, &p->fcgi_iface))
+      if (!inet_aton(optarg, &p->fcgi_iface)) {
         printf("Wrong FCGI iface!\n");
+        return 1;
+      }
     break;
     case 6:
-      if (!inet_aton(optarg, &p->cli_iface))
+      if (!inet_aton(optarg, &p->cli_iface)) {
         printf("Wrong CLI iface!\n");
+        return 1;
+      }
     break;
     case 7:
       strncpy(p->bdprefix, optarg, sizeof(p->bdprefix));
     break;
     case 8:
-      if (ut_s2n10(optarg, &p->rd_expire_timer))
+      if (ut_s2n10(optarg, &p->rd_expire_timer)) {
         printf("Wrong timer!\n");
+        return 1;
+      }
     break;
     case 9:
-      if (ut_s2n10(optarg, &p->event_timer))
+      if (ut_s2n10(optarg, &p->event_timer)) {
         printf("Wrong timer!\n");
+        return 1;
+      }
+    break;
+    case 10:
+      strncpy(p->logfilename, optarg, sizeof(p->logfilename));
     break;
   }
   return 0;
@@ -535,14 +561,13 @@ int dm_handle_args(dm_prm_t * p, int argc, char **argv)
   int optidx;
 
   while (1) {
-    c = getopt_long(argc, argv, "hfl:d:s:m:", loptions,  &optidx);
+    c = getopt_long(argc, argv, "hfd:s:m:", loptions,  &optidx);
     if (c==-1)
       break;
     switch (c) {
       case 0:
-        return dm_handle_long_opt(p, optidx);
-      break;
-      case 'l':
+        if (dm_handle_long_opt(p, optidx))
+          return 1;
       break;
       case 'd':
        p->dlevel =  strtoul(optarg, 0, 10);
@@ -551,10 +576,16 @@ int dm_handle_args(dm_prm_t * p, int argc, char **argv)
        p->foreground = 1;
       break;
       case 's':
-        ut_s2n10(optarg, &p->minths);
+        if (ut_s2n10(optarg, &p->minths)) {
+          printf("Wrong threads number!\n");
+          return 1;
+        }
       break;
       case 'm':
-        ut_s2n10(optarg, &p->maxths);
+        if (ut_s2n10(optarg, &p->maxths)) {
+          printf("Wrong threads number!\n");
+          return 1;
+        }
       break;
       case '?':
       case 'h':
@@ -2001,11 +2032,19 @@ int dm_thpool_stop(dm_thpool_t *ta)
   int i,cnt;
   uint16_t timer;
 
+
   pthread_mutex_lock(&ta->mtx);
+
+  if (!ta->cnt) {
+    pthread_mutex_unlock(&ta->mtx);
+    return 0;
+  }
+
   for (i=0;i<ta->cnt;i++)
      ta->th[i]->stop=1;
   timer = (ta->cnt+1);
   pthread_mutex_unlock(&ta->mtx);
+
 
   while (timer!=0) {
 
@@ -2047,11 +2086,10 @@ int dm_handle_timeout()
 
 int main(int argc, char **argv)
 {
-
   dm_init_vars(&dm_vars);
 
   if (dm_handle_args(&dm_vars.prm, argc, argv))
-      dm_exit(&dm_vars, 0);
+    dm_exit(&dm_vars, 1);
 
   if (dm_init(&dm_vars))
     dm_exit(&dm_vars, 1);

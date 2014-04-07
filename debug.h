@@ -13,7 +13,7 @@ typedef struct
   int   level;
 } dbg_desc_t;
 
-int debug_init(dbg_desc_t *, int level);
+int debug_init(dbg_desc_t *, int level, const char *filename);
 void debug_free(dbg_desc_t *);
 void debug_print(dbg_desc_t *, int mlevel, const char *format, ...);
 

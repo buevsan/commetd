@@ -329,7 +329,7 @@ int dm_init(dm_vars_t *v)
 
 
   /* open cli socket */
-  struct sockaddr_in sa;
+  struct sockaddr_in sa;  
 
   DBGL(2,"Create cli socket %u...", v->prm.cliport);
 

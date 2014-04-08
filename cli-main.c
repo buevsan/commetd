@@ -24,6 +24,7 @@ typedef struct cli_prm_s
   uint8_t json;
   struct in_addr dm_addr;
   uint16_t dm_port;
+  uint16_t cm_timeout;
 } cli_prm_t;
 
 typedef struct cli_vars_s
@@ -55,12 +56,13 @@ int cli_init_vars(cli_vars_t *v)
   v->prm.dlevel=0;
   v->prm.dm_port=7777;
   v->prm.dm_addr.s_addr = inet_addr("127.0.0.1");
+  v->prm.cm_timeout = 5000;
   return 0;
 }
 
 int cli_init(cli_vars_t *v)
 {  
-  if (debug_init(&v->dbg, v->prm.dlevel))
+  if (debug_init(&v->dbg, v->prm.dlevel, 0))
       return -1;
   libdio_setlog(&v->dbg);
 
@@ -102,14 +104,26 @@ int cli_connect(cli_vars_t *v)
       ERR("connect %s", strerror(errno));
       return -1;
     }
-  }
+  } else
+    return 0;
+
 
   r = libdio_waitfd(v->fd, 500, 'w');
 
-  DBG("r:%i", r);
-
   if (r!=0)
     return -1;
+
+  int retVal = -1;
+  socklen_t retValLen = sizeof(retVal);
+
+  r = getsockopt(v->fd, SOL_SOCKET, SO_ERROR, &retVal, &retValLen);
+  if (r!=0)
+    return -1;
+
+  if (retVal) {
+    ERR("%s", strerror(retVal));
+    return -1;
+  }
 
   return 0;
 }
@@ -150,11 +164,12 @@ static struct option loptions[] = {
 
 void cli_print_help(void)
 {
-  printf("cli [host] [port] \n\n");
+  printf("\ncli [host] [port]\n\n");
   printf("-h - help\n"
+         "-t <timeout> - command timeout\n"
          "-d <level> - debug level\n"
-         "-l <file> - logfile\n"
-         "-c - command\n");
+         "-c <command> - command to execute\n"
+         "-j - json command format\n");
 }
 
 int cli_handle_long_opt(cli_prm_t *p, int idx)
@@ -165,16 +180,22 @@ int cli_handle_long_opt(cli_prm_t *p, int idx)
       cli_print_help();
       return 1;
     case 1:
-      if (!inet_aton(optarg, &p->dm_addr))
+      if (!inet_aton(optarg, &p->dm_addr)) {
         printf("Wrong REDIS address!\n");
+        return -1;
+      }
     break;
     case 2:
-      if (ut_s2n10(optarg, &p->dm_port))
+      if (ut_s2n10(optarg, &p->dm_port)) {
         printf("Wrong port!\n");
+        return -1;
+      }
     break;
     case 3:
-      if (!optarg)
-        return 1;
+      if (!optarg) {
+        printf("Wrong command!\n");
+        return -1;
+      }
       p->cm=optarg;
     break;
     default:;
@@ -188,13 +209,13 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
   int optidx;
 
   while (1) {
-    c = getopt_long(argc, argv, "jhp:d:c:", loptions,  &optidx);
+    c = getopt_long(argc, argv, "jhd:c:t:", loptions,  &optidx);
     if (c==-1)
       break;
     switch (c) {
       case 0:
         if (cli_handle_long_opt(p, optidx))
-          return 1;
+          return -1;
       break;
       case 'j':
         p->json=1;
@@ -204,8 +225,12 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
       break;
       case 'c':
         if (!optarg)
-          return 1;
+          return -1;
         p->cm=optarg;
+      break;
+      case 't':
+        if (ut_s2n10(optarg, &p->cm_timeout))
+          return -1;
       break;
       case 'h':
        cli_print_help();
@@ -216,29 +241,30 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
 
  if (optind < argc)
    if (!inet_aton(argv[optind], &p->dm_addr)){
-     ERR("Wrong host!");
+     printf("Wrong host!\n");
      return -1;
    };
 
  if ((optind+1) < argc)
    if (ut_s2n10(argv[optind+1], &p->dm_port)) {
-     ERR("Wrong port!");
+     printf("Wrong port!\n");
      return -1;
    }
 
  if ((optind+2) < argc)
    p->cm = argv[optind+2]; 
 
- if ((!p->cm) || (!strlen(p->cm)))
-   return 1;
+ if ((!p->cm) || (!strlen(p->cm))) {
+   printf("Wrong command!\n");
+   return -1;
+ }
 
  return 0;
 }
 
-int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
+int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json, uint16_t timeout)
 {
   int r;
-  int timeout=5000;
 
   DBG("%s", command);
 
@@ -250,7 +276,8 @@ int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
   hdr->hdr.len = htons(strlen(command)+1);
   strncpy(hdr->cmd, command, bufsize-sizeof(libdio_msg_hdr_t));
 
-  libdio_write_message(fd, buf);
+  if (libdio_write_message(fd, buf))
+    goto error;
 
   r = libdio_waitfd(fd, timeout, 'r');
 
@@ -260,7 +287,9 @@ int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json)
     goto error;
   }
 
-  libdio_read_message(fd, buf);
+  if (libdio_read_message(fd, buf))
+     goto error;
+
   libdio_msg_str_cmd_r_t *hdr_r = (libdio_msg_str_cmd_r_t *)buf;
 
   DBG("response status %02X", hdr_r->rhdr.status);
@@ -288,7 +317,18 @@ error:
 int cli_mk_command(cli_vars_t *v)
 {
   DBG("cm: %s", v->prm.cm);
-  return cli_execute_cm(v->fd, v->buf, CMBUFSIZE, v->prm.cm, v->prm.json);
+  return cli_execute_cm(v->fd, v->buf, CMBUFSIZE, v->prm.cm, v->prm.json, v->prm.cm_timeout);
+}
+
+int cli_exit(cli_vars_t *v, int code)
+{
+  cli_cleanup(v);
+  if (code) {
+    DBG("Exit: with error %i", code);
+  } else {
+    DBG("Exit: success");
+  }
+  exit(code);
 }
 
 int main(int argc, char **argv)
@@ -297,18 +337,18 @@ int main(int argc, char **argv)
   cli_init_vars(&cli_vars);
 
   if ((r = cli_handle_args(&cli_vars.prm, argc, argv)))
-    return (r>0)?0:1;
+    cli_exit(&cli_vars, (r>0)?0:1);
 
   if (cli_init(&cli_vars))
-    return -1;
+    cli_exit(&cli_vars, -1);
 
   if (cli_connect(&cli_vars))
-    return -1;
+    cli_exit(&cli_vars, -1);
 
-  cli_mk_command(&cli_vars);
+  if (cli_mk_command(&cli_vars))
+    cli_exit(&cli_vars, -1);
 
-  cli_cleanup(&cli_vars);
-
+  cli_exit(&cli_vars, 0);
   return 0;
 }
 

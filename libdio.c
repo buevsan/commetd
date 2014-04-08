@@ -53,13 +53,18 @@ int libdio_save_read(int fd, void *buf, size_t size)
       return -1;
     }
 
-    r=read(fd, &((char*)buf)[rcv], size-rcv);
+    r=read(fd, &((char*)buf)[rcv], size-rcv);    
 
     if (r<0) {
       if (r!=EINTR) {
         ERR("read %s", strerror(errno));
         return -1;
       }
+    }
+
+    if (r==0) {
+      ERR("read return zero");
+      return -1;
     }
 
     rcv += r;
@@ -73,7 +78,11 @@ int libdio_save_read(int fd, void *buf, size_t size)
 
 int libdio_save_write(int fd, void *buf, size_t size)
 {
-  return write(fd, buf, size);
+  if (write(fd, buf, size)!=size) {
+    ERR("write error\n");
+    return -1;
+  }
+  return 0;
 }
 
 int libdio_read_message(int fd,  uint8_t *buf)
@@ -210,14 +219,16 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
   struct timeval tv;
   int r;
 
-  FD_ZERO(&set);
-  FD_SET(fd, &set);
-  memset(&tv, 0 ,sizeof(tv));
-  tv.tv_usec = 1000*timer;
 
   while (1) {
 
     DBGL(4, "wait fd: %i for '%c' timer %u", fd, m, timer);
+
+    FD_ZERO(&set);
+    FD_SET(fd, &set);
+    memset(&tv, 0 ,sizeof(tv));
+    tv.tv_usec = 1000*timer;
+
     r = select(fd+1, (m=='r')?&set:0, (m=='w')?&set:0, 0, &tv);
 
     if (r<0) {
@@ -232,7 +243,7 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
     if (r==0)
       return 1;
 
-    if (r>0)
+    if ((r>0) && (FD_ISSET(fd, &set)))
       break;
   }
 
@@ -242,13 +253,17 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
 int libdio_setnonblock(int fd, uint8_t en)
 {
   int flags = fcntl(fd, F_GETFL, 0);
-  if (flags==-1)
+  if (flags==-1) {
+    ERR("fcntl: %s", strerror(errno));
     return -1;
+  }
 
   if (en) flags |= O_NONBLOCK;
-  else flags &= O_NONBLOCK;
+  else flags &= ~O_NONBLOCK;
 
-  if (fcntl(fd, F_SETFL, flags ))
+  if (fcntl(fd, F_SETFL, flags )) {
+    ERR("fcntl: %s", strerror(errno));
     return -1;
+  }
   return 0;
 }

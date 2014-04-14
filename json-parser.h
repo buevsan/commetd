@@ -3,12 +3,11 @@
 
 #include <json/json.h>
 
-/*printing the value corresponding to boolean, double, integer and strings*/
-void print_json_value(json_object *jobj);
-void json_parse_array( json_object *jobj, char *key);
-
-/*Parsing the json object*/
-void json_parse(json_object * jobj);
+typedef struct json_obj_check_item_s {
+  char *name;
+  json_type type;
+  struct json_obj_check_s *next;
+} json_obj_check_item_t;
  
 #endif
 

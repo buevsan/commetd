@@ -43,8 +43,10 @@ typedef struct dm_prm_s
   int redisdb;
   char bdprefix[33];
   char logfilename[128];
-  union {
+  struct {
    uint8_t foreground:1;
+   uint8_t fcgi_http_debug:1;
+   uint8_t no_check_iface:1;
   };
 } dm_prm_t;
 
@@ -74,6 +76,7 @@ typedef struct dm_thread_s
 typedef struct dm_fcgi_thprm_s
 {
   int fd;
+  uint8_t fcgi_http_debug;
 } dm_fcgi_thprm_t;
 
 typedef struct dm_fcgi_thdata_s
@@ -138,6 +141,7 @@ void *dm_fcgi_thread(void *ptr);
 void sig_handler(int signum);
 void sigchld_handler(int signum);
 int dm_thpool_stop(dm_thpool_t *ta);
+int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize);
 
 dm_vars_t dm_vars;
 
@@ -367,10 +371,18 @@ int dm_init(dm_vars_t *v)
   libdio_signal(SIGALRM, sig_handler);
   libdio_signal(SIGCHLD, sigchld_handler);
 
+  /* assign parameters to threads pools */
+  dm_fcgi_thprm_t fcgi_prm;
+  fcgi_prm.fd = v->fcgi_fd;
+  fcgi_prm.fcgi_http_debug = v->prm.fcgi_http_debug;
 
-  for (i=0; i<v->prm.minths; ++i) {
-    dm_thpool_add(&v->clipool, &v->cli_fd, sizeof(v->cli_fd));
-    dm_thpool_add(&v->fcgipool, &v->fcgi_fd, sizeof(v->fcgi_fd));
+  dm_cli_thprm_t cli_prm;
+  cli_prm.fd = v->cli_fd;
+
+  /* start threads */
+  for (i=0; i<v->prm.minths; ++i) {      
+    dm_thpool_add(&v->clipool, &cli_prm, sizeof(cli_prm));
+    dm_thpool_add(&v->fcgipool, &fcgi_prm, sizeof(fcgi_prm));
   }
 
   if (!v->prm.foreground) {
@@ -458,6 +470,8 @@ static struct option loptions[] = {
   {"event-expire", 1, 0, 0},
   {"event-wait", 1, 0, 0},
   {"log", 1, 0, 0},
+  {"fcgi-http-debug", 0, 0, 0},
+  {"no-check-iface", 0, 0, 0},
   {0, 0, 0, 0}
 };
 
@@ -472,7 +486,9 @@ static char * loptdesc[] = {
   "REDIS database key prefix",
   "REDIS key expire timer",
   "Event waiting timer",
-  "Log file name"
+  "Log file name",
+  "Send HTTP debug page via FCGI without simple answer",
+  "Do not check iface allowed for command"
 };
 
 void dm_print_help(void)
@@ -550,6 +566,12 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
     break;
     case 10:
       strncpy(p->logfilename, optarg, sizeof(p->logfilename));
+    break;
+    case 11:
+      p->fcgi_http_debug=1;
+    break;
+    case 12:
+      p->no_check_iface=1;
     break;
   }
   return 0;
@@ -768,14 +790,6 @@ typedef struct dm_json_obj_s {
   json_type type;
   struct dm_json_obj_s *next;
 } dm_json_obj_t;
-
-dm_json_obj_t msg_edata_items[]= {
-  { "type", json_type_string, 0 },
-  { "message", json_type_string, 0 },
-  { "type_id", json_type_int, 0 },
-  { "unique", json_type_string, 0 },
-  { 0, 0, 0 }
-};
 
 dm_json_obj_t gen_items[]= {
   { "cmd", json_type_string, 0 },
@@ -1014,6 +1028,7 @@ int dm_check_receiver(dm_vars_t *v, const char *receiver)
 
 void dm_add_json_string(json_object *o, const char *key, const char *value)
 {
+  json_object_object_del(o, key);
   json_object *no = json_object_new_string(value);
   json_object_object_add(o, key, no);
 }
@@ -1329,22 +1344,22 @@ typedef int (*do_cmd_funt_t)(dm_vars_t *, json_object *, json_object**);
 typedef struct {
   char *name;
   do_cmd_funt_t do_cmd;
-  uint8_t id;
+  uint32_t flags;
 } json_cmd_table_item_t;
 
 typedef enum
-{EV_SETEVENT, EV_GETEVENT, EV_CREATEUSER, EV_DELETEUSER}
+{CMFL_IFACEFCGI=1, CMFL_IFACECLI=2}
 event_id_t;
 
 json_cmd_table_item_t cm_str_table[]={
-  { "SetEvent", dm_do_set_event, EV_SETEVENT },
-  { "GetEvent", dm_do_get_event, EV_GETEVENT },
-  { "CreateUser", dm_do_create_user, EV_CREATEUSER },
-  { "DeleteUser", dm_do_delete_user, EV_DELETEUSER },
+  { "SetEvent", dm_do_set_event, CMFL_IFACECLI },
+  { "GetEvent", dm_do_get_event, CMFL_IFACECLI | CMFL_IFACEFCGI },
+  { "CreateUser", dm_do_create_user, CMFL_IFACECLI },
+  { "DeleteUser", dm_do_delete_user, CMFL_IFACECLI },
   { 0, 0, 0 }
 };
 
-json_cmd_table_item_t *dm_find_json_cmd(json_cmd_table_item_t *t, char *cm)
+json_cmd_table_item_t *dm_find_json_cmd(json_cmd_table_item_t *t, const char *cm)
 {
   int i = 0;
   while (t[i].name) {
@@ -1358,7 +1373,8 @@ json_cmd_table_item_t *dm_find_json_cmd(json_cmd_table_item_t *t, char *cm)
 int dm_process_json_cmd(json_object *req, json_object **ans)
 {
   json_object *cmd_obj=0;
-  char *cmd;
+  const char *cmd, *iface;
+  uint32_t mask;
   int r=0;
 
   if (!req) {
@@ -1373,8 +1389,8 @@ int dm_process_json_cmd(json_object *req, json_object **ans)
     goto exit;
   }
 
-  cmd_obj = dm_json_getobj(req, "cmd", json_type_string);
-  cmd = (char *)json_object_get_string(cmd_obj);
+
+  cmd = dm_get_json_str_value(req, "cmd");
 
   DBG("cmd: '%s'", cmd);
 
@@ -1385,6 +1401,23 @@ int dm_process_json_cmd(json_object *req, json_object **ans)
     goto exit;
   }
 
+  /* check iface allowed for command */
+  if (!dm_vars.prm.no_check_iface) {
+    iface = dm_get_json_str_value(req, "interface");
+    mask = 0;
+    if (strcmp(iface, "cli")==0)
+      mask |= CMFL_IFACECLI;
+    if (strcmp(iface, "fcgi")==0)
+      mask |= CMFL_IFACEFCGI;
+
+    if (!(cm->flags & mask)) {
+      DBG("wrong iface '%s' for command '%s'", iface, cmd);
+      r= ERR_ACCESS;
+      goto exit;
+    }
+  }
+
+  /* execute command */
   cm->do_cmd(&dm_vars, req, ans);
 
 exit:
@@ -1616,6 +1649,9 @@ char *fcgi_answer[] =
   "</html>\r\n",
   0
 };
+
+char *fcgi_answer_prefix="Content-type: text/html\r\n\r\n<html><body>";
+char *fcgi_answer_suffix="</body></html>";
 
 void dm_fcgi_out_strs(FCGX_Request *r, char **s)
 {
@@ -1910,25 +1946,32 @@ exit:
 
   FCGX_GetStr(thd->buf, THREADBUFSIZE, r->in);
 
-  dm_fcgi_out_strs(r, fcgi_answer);
-  FCGX_PutS(server_name, r->out);
-  dm_fcgi_out_strs(r, &fcgi_answer[10]);
+  if (thd->p.fcgi_http_debug) {
 
-  /*dm_fcgi_out_strs_n(r, r->envp);*/
+   dm_fcgi_out_strs(r, fcgi_answer);
+   FCGX_PutS(server_name, r->out);
+   dm_fcgi_out_strs(r, &fcgi_answer[10]);
 
-  FCGX_PutS("<p> QUERY: ", r->out);
-  FCGX_PutS(query_string, r->out);
-  FCGX_PutS("</p>", r->out);
+   dm_fcgi_out_strs_n(r, r->envp);
 
-  FCGX_PutS("<p> POST: ", r->out);
-  FCGX_PutS(thd->buf, r->out);
-  FCGX_PutS("</p>", r->out);
+   FCGX_PutS("<p> QUERY: ", r->out);
+   FCGX_PutS(query_string, r->out);
+   FCGX_PutS("</p>", r->out);
 
-  FCGX_PutS("<p> ANSWER: ", r->out);
-  FCGX_PutS(json_object_to_json_string(ans), r->out);
-  FCGX_PutS("</p>", r->out);
+   FCGX_PutS("<p> POST: ", r->out);
+   FCGX_PutS(thd->buf, r->out);
+   FCGX_PutS("</p>", r->out);
 
-  dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
+   FCGX_PutS("<p> ANSWER: ", r->out);
+   FCGX_PutS(json_object_to_json_string(ans), r->out);
+   FCGX_PutS("</p>", r->out);
+   dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
+
+  } else {
+   FCGX_PutS(fcgi_answer_prefix, r->out);
+   FCGX_PutS(json_object_to_json_string(ans), r->out);
+   FCGX_PutS(fcgi_answer_suffix, r->out);
+  }
 
   json_object_put(req);
   json_object_put(ans);

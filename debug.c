@@ -11,6 +11,7 @@ int debug_init(dbg_desc_t *d, int level, const char *filename)
   if (!d->buf)
    goto error;
 
+  d->file=0;
   if (filename) {
     d->file = fopen(filename, "at+");
     if (!d->file) {
@@ -35,11 +36,14 @@ void debug_free(dbg_desc_t *d)
 {
   if ((d->file) && (d->file!=stdout)) {
     fflush(d->file);
-    /*fclose(d->file);*/
+    fclose(d->file);
+    d->file=0;
   }
 
-  if (d->buf)
+  if (d->buf) {
     free(d->buf);
+    d->buf=0;
+  }
   pthread_mutex_destroy(&d->mtx);
 }
 

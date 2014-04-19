@@ -22,7 +22,7 @@
 #include "utils.h"
 #include "libdio.h"
 
-#define MAXCLIENTS 32
+#define MAXCLIENTS 1024
 #define THREADBUFSIZE 2048
 #define THREADSTACKSIZE 40
 
@@ -40,7 +40,7 @@ typedef struct dm_prm_s
   uint16_t minths;
   uint16_t event_timer;
   uint16_t rd_expire_timer;
-  int redisdb;
+  uint16_t redisdb;
   char bdprefix[33];
   char logfilename[128];
   struct {
@@ -254,13 +254,14 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.fcgiport=6666;
   v->prm.cliport=7777;
   v->prm.sleeptimer=1000;
-  v->prm.minths = 1;
+  v->prm.minths = 300;
   v->prm.maxths = MAXCLIENTS;
   v->prm.redisdb = 3;
   v->prm.redisport = 6379;  
   v->prm.event_timer = 5;
   v->prm.rd_expire_timer = 60;
   strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
+  strncpy(v->prm.logfilename, "/var/log/commetd.log", sizeof(v->prm.logfilename));
 
   dm_init_th_pipe(&v->thpipe);
   pthread_mutex_init(&v->rdmtx, 0);
@@ -273,9 +274,14 @@ int dm_init(dm_vars_t *v)
   uint16_t i;
   char *s;
   char str[32];  
+  char *log;
 
-  if (debug_init(&v->dbg, v->prm.dlevel,
-                 (v->prm.logfilename[0])?v->prm.logfilename:0))
+  log = 0;
+  if (v->prm.logfilename[0])
+   if (strcmp(v->prm.logfilename, "std"))
+     log=v->prm.logfilename;
+
+  if (debug_init(&v->dbg, v->prm.dlevel, log))
     return -1;
   libdio_setlog(&v->dbg);
 
@@ -320,13 +326,13 @@ int dm_init(dm_vars_t *v)
   struct timeval timeout = { 1, 500000 };
   v->rdCtx = redisConnectWithTimeout(s?s:"127.0.0.1", v->prm.redisport, timeout);
   if ((!v->rdCtx) || (v->rdCtx->err)) {
-    ERR("Can't connect to db '%i'!", v->prm.redisdb);
+    ERR("Can't connect to Redis server '%s'!", s?s:"127.0.0.1");
     return -1;
   }
 
-  v->rdReply = redisCommand(v->rdCtx, "select %i", v->prm.redisdb);
+  v->rdReply = redisCommand(v->rdCtx, "select %u", v->prm.redisdb);
   if (!v->rdReply) {
-    ERR("Can't select db '%i'!", v->prm.redisdb);
+    ERR("Can't select db '%u'!", v->prm.redisdb);
     return -1;
   }
   freeReplyObject(v->rdReply);
@@ -472,6 +478,7 @@ static struct option loptions[] = {
   {"log", 1, 0, 0},
   {"fcgi-http-debug", 0, 0, 0},
   {"no-check-iface", 0, 0, 0},
+  {"rd-db", 1, 0, 0},
   {0, 0, 0, 0}
 };
 
@@ -489,6 +496,7 @@ static char * loptdesc[] = {
   "Log file name",
   "Send HTTP debug page via FCGI without simple answer",
   "Do not check iface allowed for command"
+  "Redis database index"
 };
 
 void dm_print_help(void)
@@ -572,6 +580,12 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
     break;
     case 12:
       p->no_check_iface=1;
+    break;
+    case 13:
+      if (ut_s2n10(optarg, &p->redisdb)) {
+        printf("Wrong redis db index!\n");
+        return 1;
+      }
     break;
   }
   return 0;
@@ -2165,8 +2179,8 @@ int main(int argc, char **argv)
     rset = set;
     int maxfd,s ;
 
-    /*maxfd = (dm_vars.cli_fd > dm_vars.fcgi_fd)?dm_vars.cli_fd:dm_vars.fcgi_fd;*/
-    maxfd = dm_vars.thpipe.fd[0];
+    maxfd = (dm_vars.cli_fd > dm_vars.fcgi_fd)?dm_vars.cli_fd:dm_vars.fcgi_fd;
+    maxfd = (maxfd < dm_vars.thpipe.fd[0])?dm_vars.thpipe.fd[0]:maxfd;
     maxfd += 1;
     s = select(maxfd, &rset, 0, 0, &tv);
 

@@ -1,5 +1,5 @@
 CFLAGS+=-I. -DDM_DEBUG -DCLI_DEBUG -Wall
-LIBS=-ljson-c -lfcgi -lfcgi -lpthread -lhiredis
+LIBS=-ljson-c -lfcgi -lpthread -lhiredis
 
 %: %.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<  $(LIBS)

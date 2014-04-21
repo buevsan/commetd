@@ -39,7 +39,6 @@ void debug_free(dbg_desc_t *d)
     fclose(d->file);
     d->file=0;
   }
-
   if (d->buf) {
     free(d->buf);
     d->buf=0;

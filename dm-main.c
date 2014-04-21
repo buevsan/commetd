@@ -22,8 +22,9 @@
 #include "utils.h"
 #include "libdio.h"
 
+#define MAXEVENTS_PERRECEIVER 200
 #define MAXCLIENTS 1024
-#define THREADBUFSIZE 2048
+#define THREADBUFSIZE 20000
 #define THREADSTACKSIZE 40
 
 typedef struct dm_prm_s
@@ -36,6 +37,10 @@ typedef struct dm_prm_s
   uint16_t cliport;
   struct in_addr cli_iface;
   struct in_addr fcgi_iface;
+
+  uint16_t minfcgi_ths;
+  uint16_t mincli_ths;
+
   uint16_t maxths;
   uint16_t minths;
   uint16_t event_timer;
@@ -43,6 +48,7 @@ typedef struct dm_prm_s
   uint16_t redisdb;
   char bdprefix[33];
   char logfilename[128];
+  char cookiename[33];
   struct {
    uint8_t foreground:1;
    uint8_t fcgi_http_debug:1;
@@ -112,6 +118,7 @@ typedef struct dm_thpool_s
   void *(*th_fun) (void *);
   void *data;
   uint16_t cnt;
+  uint16_t runcnt;
   uint16_t maxcnt;
   uint16_t peakcnt;
   uint16_t type;
@@ -162,7 +169,7 @@ dm_vars_t dm_vars;
 #define ERR_WRONG_MANDATORY_ITEM 2
 #define ERR_DATABASE  3
 #define ERR_UNKNOWN_COMMAND  4
-#define ERR_TIMEOUT  5
+#define ERR_TIMEOUT  408
 #define ERR_ACCESS   6
 
 typedef struct {
@@ -262,6 +269,7 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.rd_expire_timer = 60;
   strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
   strncpy(v->prm.logfilename, "/var/log/commetd.log", sizeof(v->prm.logfilename));
+  strncpy(v->prm.cookiename, "PHPSESSID", sizeof(v->prm.cookiename));
 
   dm_init_th_pipe(&v->thpipe);
   pthread_mutex_init(&v->rdmtx, 0);
@@ -283,6 +291,7 @@ int dm_init(dm_vars_t *v)
 
   if (debug_init(&v->dbg, v->prm.dlevel, log))
     return -1;
+
   libdio_setlog(&v->dbg);
 
   DBG("Initilization...");
@@ -421,8 +430,6 @@ int dm_cleanup(dm_vars_t *v)
 
   debug_free(&v->dbg);
 
-
-
   return 0;
 }
 
@@ -479,6 +486,7 @@ static struct option loptions[] = {
   {"fcgi-http-debug", 0, 0, 0},
   {"no-check-iface", 0, 0, 0},
   {"rd-db", 1, 0, 0},
+  {"cookie-name", 1, 0, 0},
   {0, 0, 0, 0}
 };
 
@@ -495,8 +503,9 @@ static char * loptdesc[] = {
   "Event waiting timer",
   "Log file name",
   "Send HTTP debug page via FCGI without simple answer",
-  "Do not check iface allowed for command"
-  "Redis database index"
+  "Do not check iface allowed for command",
+  "Redis database index",
+  "Cookie variable name"
 };
 
 void dm_print_help(void)
@@ -586,6 +595,9 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
         printf("Wrong redis db index!\n");
         return 1;
       }
+    break;
+    case 14:
+      strncpy(p->cookiename, optarg, sizeof(p->cookiename));
     break;
   }
   return 0;
@@ -1061,8 +1073,8 @@ json_object *dm_mk_event_record(const char *event_time, const char *event_type,
 
 int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
 {
-  int r;
-  const char *receiver, *prefix, *dbid, *edata, *event_type;
+  int r=0;
+  const char *receiver, *prefix, *dbid, *edata, *event_type, *iface;
   json_object *o=0;
   char event_time[32];
   char s[16];
@@ -1085,11 +1097,14 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
   receiver = dm_get_json_str_value(req, "receiver");
   edata = dm_get_json_str_value(req, "edata");
 
-  if (dm_check_receiver(v, receiver)) {
-    ERR("Receiver '%s' not exist", receiver);
-    r=ERR_ACCESS;
-    goto exit;
-  }
+  /* Check receiver only if from cli iface */
+  iface = dm_get_json_str_value(req, "interface");
+  if (strcmp(iface, "cli"))
+    if (dm_check_receiver(v, receiver)) {
+      ERR("Receiver '%s' not exist", receiver);
+      r=ERR_ACCESS;
+      goto exit;
+    }
 
   prefix = dm_get_json_str_value(req, "prefix");
   if (!prefix)
@@ -1156,10 +1171,67 @@ int dm_compare_event_keys(const void *i1, const void *i2)
   return 0;
 }
 
-int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver, uint32_t *item, uint16_t *cnt)
+json_object * dm_get_event_db_data(dm_vars_t *v, redisReply **rdReplyP, const char *prefix,
+                                   const char *receiver, uint32_t utime)
+{
+  json_object *o=0;
+  redisReply *rdReply = (*rdReplyP);
+
+  rdReply = redisCommand(v->rdCtx, "get %s:%s:%u ", prefix, receiver, utime);
+  if (!rdReply) {
+    ERR("Can't get founded event");
+    goto exit;
+  }
+
+  if (rdReply->type!=REDIS_REPLY_STRING) {
+    ERR("Event data not a string %i", rdReply->type);
+    goto exit;
+  }
+
+  o = json_tokener_parse(rdReply->str);
+  if (!o) {
+    ERR("Database has record with wrong syntax: '%s'", rdReply->str);
+    goto exit;
+  }
+
+exit:
+  /*freeReplyObject(rdReply);*/
+  (*rdReplyP) = rdReply;
+
+  return o;
+}
+
+int dm_get_event_db_received_flag(dm_vars_t *v, const char *prefix,
+                                  const char *receiver, uint32_t utime, uint16_t *received)
+{
+  int r = ERR_DATABASE;
+  json_object *o;
+  redisReply *rdReply;
+
+  o = dm_get_event_db_data(v, &rdReply, prefix, receiver, utime);
+  if (!o)
+    goto exit;
+  if (ut_s2n10(dm_get_json_str_value(o, "received"), received))
+    goto exit;
+
+  r=0;
+
+exit:
+
+  if (rdReply)
+   freeReplyObject(rdReply);
+
+  if (o)
+   json_object_put(o);
+
+  return r;
+}
+
+int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
+                      char checkreceived, uint32_t *item, uint16_t *cnt)
 {
   int r=0;
-  uint16_t i;
+  uint16_t i, rcnt, received;
   char key[64];
 
   snprintf(key, sizeof(key), "%s:%s:*", prefix, receiver);
@@ -1174,29 +1246,43 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver, ui
   DBGL(3,"redis reply: t:%i e:%i", v->rdReply->type, v->rdReply->elements);
   (*cnt) = ((*cnt) < v->rdReply->elements)?(*cnt):v->rdReply->elements;
 
-
   redisReply *reply;
   char *c;
 
+  rcnt=0;
   for (i=0; i<(*cnt); ++i) {
     reply = v->rdReply->element[i];
     DBGL(3,"event_key: '%s'", reply->str);
     c = strrchr(reply->str, ':');
     if (!c)
       continue;
-    item[i]=(uint32_t)strtoul(c+1, 0, 10);
+
+    if (ut_s2nl10(c+1, &item[rcnt]))
+      continue;
+    /*item[i]=(uint32_t)strtoul(c+1, 0, 10);*/
+
+    if (checkreceived) {
+      if (dm_get_event_db_received_flag(v, prefix, receiver, item[rcnt], &received))
+        continue;
+      if (received)
+        continue;
+    }
+    DBGL(3,"added: '%u'", item[rcnt]);
+    rcnt++;
   }
 
-  if ((*cnt)>1)
-    qsort(item, (*cnt), 4, dm_compare_event_keys);
+  if ((rcnt)>1)
+    qsort(item, rcnt, 4, dm_compare_event_keys);
 
-  for (i=0; i<(*cnt); ++i)
+  for (i=0; i<rcnt; ++i)
     DBGL(2, "event_time: '%u'", item[i]);
 
 exit:
 
   if (v->rdReply)
     freeReplyObject(v->rdReply);
+
+  (*cnt)=rcnt;
 
   return r;
 }
@@ -1217,13 +1303,63 @@ uint32_t *dm_find_event(uint32_t *item, uint16_t cnt, uint32_t min)
   return 0;
 }
 
+int dm_set_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *receiver, uint32_t utime)
+{
+  int r=0;
+  redisReply *rdReply;
+
+  rdReply = redisCommand(v->rdCtx, "set %s:%s:lasttime %u", prefix, receiver, utime);
+  if (!rdReply) {
+    r = ERR_DATABASE;
+    ERR("Can't set redis key %s:%s:lasttime value '%u'", prefix, receiver, utime);
+    goto exit;
+  }
+  freeReplyObject(rdReply);
+
+exit:
+
+  return r;
+}
+
+int dm_get_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *receiver, uint32_t *utime)
+{
+  int r=0;
+  redisReply *rdReply;
+
+  rdReply = redisCommand(v->rdCtx, "get %s:%s:lasttime", prefix, receiver);
+  if (!rdReply) {
+    r = ERR_DATABASE;
+    ERR("Can't get redis key '%s:%s:lasttime'", prefix, receiver);
+    goto exit;
+  }
+
+  if (rdReply->type!=REDIS_REPLY_STRING) {
+    r = ERR_DATABASE;
+    ERR("Last event time data not a string %i", rdReply->type);
+    goto exit;
+  }
+
+  if (ut_s2nl10(rdReply->str, utime)) {
+    r = ERR_DATABASE;
+    ERR("Wrong last event time '%s'", rdReply->str);
+  }
+
+exit:
+
+  if (rdReply)
+    freeReplyObject(rdReply);
+
+  return r;
+}
+
 int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 {
   int r=0;
+  char lasttime_s[32];
   const char *receiver;
   const char *min_event_time, *not_modified, *prefix;
   json_object *event_data_o=0;
-  uint32_t nkeys[200], *u32, mintime;
+  uint32_t nkeys[MAXEVENTS_PERRECEIVER], *u32, mintime, lasttime;
   uint16_t cnt;
   time_t st,t;
 
@@ -1251,13 +1387,15 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   if (!prefix)
     prefix = v->prm.bdprefix;
 
+  lasttime=0;
+  dm_get_event_db_lasttime(v, prefix, receiver, &lasttime);
 
   time(&st);
 
   do {
 
     cnt = sizeof(nkeys)>>2;
-    r = dm_get_all_events(v, prefix, receiver, nkeys, &cnt);
+    r = dm_get_all_events(v, prefix, receiver, (min_event_time)?1:0, nkeys, &cnt);
     if (r)
       goto exit;
 
@@ -1282,25 +1420,9 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   DBG("found event_time %u", *u32);
 
-  v->rdReply = redisCommand(v->rdCtx, "get %s:%s:%u ", prefix, receiver, *u32);
-  if (!v->rdReply) {
-    r = ERR_DATABASE;
-    ERR("Can't get founded event");
-    goto exit;
-  }
-
-  if (v->rdReply->type!=REDIS_REPLY_STRING) {
-    r = ERR_DATABASE;
-    ERR("Event data not a string %i", v->rdReply->type);
-    freeReplyObject(v->rdReply);
-    goto exit;
-  }
-
-  event_data_o = json_tokener_parse(v->rdReply->str);
+  event_data_o = dm_get_event_db_data(v, &v->rdReply, prefix, receiver, *u32);
   if (!event_data_o) {
     r=ERR_DATABASE;
-    ERR("Database has record with wrong syntax: '%s'", v->rdReply->str);
-    freeReplyObject(v->rdReply);
     goto exit;
   }
 
@@ -1321,7 +1443,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     if (!rdReply) {
       ERR("Can't update event record");
       r= ERR_DATABASE;
-      freeReplyObject(rdReply);
+      freeReplyObject(v->rdReply);
       goto exit;
     }
     freeReplyObject(rdReply);
@@ -1331,7 +1453,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     if (!rdReply) {
       r = ERR_DATABASE;
       ERR("Can't set expire %u for key ''", v->prm.rd_expire_timer);
-      freeReplyObject(rdReply);
+      freeReplyObject(v->rdReply);
       goto exit;
     }
     freeReplyObject(rdReply);
@@ -1339,16 +1461,29 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   }
 
+  time(&t);
+  dm_set_event_db_lasttime(v, prefix, receiver, (uint32_t)t);
+
   freeReplyObject(v->rdReply);
 
 exit:
 
+
   pthread_mutex_unlock(&v->rdmtx);
 
-  (*ans)=dm_mk_jsonanswer(r);
+  (*ans)=dm_mk_jsonanswer(r);  
 
-  if (event_data_o)
-    json_object_object_add((*ans), "event_data", event_data_o);
+
+  if (!r) {
+
+    if (lasttime) {
+      snprintf(lasttime_s, sizeof(lasttime_s), "%u", lasttime);
+      dm_add_json_string(*ans, "event_last_time", lasttime_s);
+    }
+
+    if (event_data_o)
+      json_object_object_add((*ans), "event_data", event_data_o);
+  }
 
   return r;
 }
@@ -1860,7 +1995,7 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, uint32_t *receiverid)
 
   DBG("cookies:'%s'",cookies);
 
-  if (dm_get_cookie_value(cookies, "PHPSSEID", hash))
+  if (dm_get_cookie_value(cookies, v->prm.cookiename, hash))
     return 1;
 
   if (!hash[0])
@@ -2153,13 +2288,14 @@ int main(int argc, char **argv)
 
   LOG("daemon started...");
 
+  uint8_t i;
   int fds[3];
   int fdcount;
   fd_set set, rset;
 
   FD_ZERO(&set);
-  FD_SET(dm_vars.cli_fd, &set);
-  FD_SET(dm_vars.fcgi_fd, &set);
+  /*FD_SET(dm_vars.cli_fd, &set);
+  FD_SET(dm_vars.fcgi_fd, &set);*/
   FD_SET(dm_vars.thpipe.fd[0], &set);
 
   fds[0]=dm_vars.thpipe.fd[0];
@@ -2177,16 +2313,19 @@ int main(int argc, char **argv)
     tv.tv_usec=1000*dm_vars.prm.sleeptimer;
 
     rset = set;
-    int maxfd,s ;
+    int maxfd,s;
 
-    maxfd = (dm_vars.cli_fd > dm_vars.fcgi_fd)?dm_vars.cli_fd:dm_vars.fcgi_fd;
-    maxfd = (maxfd < dm_vars.thpipe.fd[0])?dm_vars.thpipe.fd[0]:maxfd;
+    maxfd=-1;
+    for (i=0; i<fdcount; ++i)
+      if (fds[i]>maxfd)
+        maxfd = fds[i];
+
     maxfd += 1;
     s = select(maxfd, &rset, 0, 0, &tv);
 
     if (s<0) {
       if (errno != EINTR) {
-        ERR("select: %s", strerror(errno));
+        ERR("select(): %s", strerror(errno));
         dm_exit(&dm_vars, 1);
       }
       continue;
@@ -2198,7 +2337,7 @@ int main(int argc, char **argv)
     }
 
     int i, fd;
-    for (i = 0, fd = fds[0]; i <= fdcount; ++i, fd=fds[i]) {
+    for (i = 0, fd = fds[0]; i < fdcount; ++i, fd=fds[i]) {
 
       if (!FD_ISSET(fd, &rset))
         continue;

@@ -15,7 +15,7 @@
 #include "utils.h"
 #include "libdio.h"
 
-#define CMBUFSIZE 2048
+#define CMBUFSIZE 20000
 
 typedef struct cli_prm_s
 {

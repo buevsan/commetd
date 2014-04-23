@@ -164,13 +164,13 @@ dm_vars_t dm_vars;
 #define DBGL(l, ...)
 #endif
 
-#define ERR_OK 0
-#define ERR_WRONG_SYNTAX  1
-#define ERR_WRONG_MANDATORY_ITEM 2
-#define ERR_DATABASE  3
-#define ERR_UNKNOWN_COMMAND  4
+#define ERR_OK 200
+#define ERR_WRONG_SYNTAX  500
+#define ERR_WRONG_MANDATORY_ITEM 500
+#define ERR_DATABASE  500
+#define ERR_UNKNOWN_COMMAND  500
 #define ERR_TIMEOUT  408
-#define ERR_ACCESS   6
+#define ERR_ACCESS   403
 
 typedef struct {
   int code;

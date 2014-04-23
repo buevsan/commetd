@@ -166,9 +166,9 @@ dm_vars_t dm_vars;
 
 #define ERR_OK 200
 #define ERR_WRONG_SYNTAX  500
-#define ERR_WRONG_MANDATORY_ITEM 500
-#define ERR_DATABASE  500
-#define ERR_UNKNOWN_COMMAND  500
+#define ERR_WRONG_MANDATORY_ITEM 5000
+#define ERR_DATABASE  5001
+#define ERR_UNKNOWN_COMMAND  5002
 #define ERR_TIMEOUT  408
 #define ERR_ACCESS   403
 
@@ -877,6 +877,10 @@ int dm_json_check(json_object *obj, dm_json_obj_t *table)
 json_object * dm_mk_jsonanswer_text(int code, char *text)
 {
   json_object * answer_o = json_object_new_object();
+
+  if (!code)
+    code=ERR_OK;
+
   json_object * code_o = json_object_new_int(code);
   json_object_object_add(answer_o, "code", code_o);
   
@@ -1120,15 +1124,16 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
   snprintf(key, sizeof(key), "%s:%s:%s", prefix, receiver, event_time);
 
   o = dm_mk_event_record(event_time, event_type, receiver, "0", edata);
+
   snprintf(value, sizeof(value), "%s", json_object_to_json_string(o));
 
   DBG("key:'%s'' val:'%s'", key, value);
 
 
-  v->rdReply = redisCommand(v->rdCtx, "set %s %s", key, value);
+  v->rdReply = redisCommand(v->rdCtx, "set %s %s", key, json_object_to_json_string(o));
   if (!v->rdReply) {
     r = ERR_DATABASE;
-    ERR("Can't set redis key '%s' value '%s'", key, value);
+    ERR("Can't set redis key '%s' value '%s'", key, json_object_to_json_string(o));
     goto exit;
   }
   freeReplyObject(v->rdReply);

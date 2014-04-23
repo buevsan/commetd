@@ -1381,7 +1381,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     goto exit;
   }
 
-  min_event_time = dm_get_json_str_value(req, "last_event_time");
+  min_event_time = dm_get_json_str_value(req, "event_last_time");
   not_modified = dm_get_json_str_value(req, "not_modified");
 
   prefix = dm_get_json_str_value(req, "prefix");

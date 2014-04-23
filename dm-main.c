@@ -2270,7 +2270,7 @@ int dm_thpool_stop(dm_thpool_t *ta)
   return 0;
 }
 
-int dm_handle_timeout()
+int dm_handle_timeout(dm_vars_t*v)
 {
   /*DBG("\n")*/
   return 0;
@@ -2309,6 +2309,7 @@ int main(int argc, char **argv)
   while (1) {
 
     /* wait for event */
+    memset(&tv, 0 ,sizeof(tv));
     tv.tv_sec=0;
     tv.tv_usec=1000*dm_vars.prm.sleeptimer;
 

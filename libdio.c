@@ -79,10 +79,18 @@ int libdio_save_read(int fd, void *buf, size_t size)
 
 int libdio_save_write(int fd, void *buf, size_t size)
 {
-  if (write(fd, buf, size)!=size) {
-    ERR("write error\n");
+  int r;
+  r = write(fd, buf, size);
+  if (r<0) {
+    ERR("write() error %s", strerror(errno));
     return -1;
   }
+
+  if (r!=size) {
+    ERR("write size error %i != %u", r, size);
+    return -1;
+  }
+
   return 0;
 }
 
@@ -228,6 +236,7 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
     FD_ZERO(&set);
     FD_SET(fd, &set);
     memset(&tv, 0 ,sizeof(tv));
+    tv.tv_sec = 0;
     tv.tv_usec = 1000*timer;
 
     r = select(fd+1, (m=='r')?&set:0, (m=='w')?&set:0, 0, &tv);

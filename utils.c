@@ -126,11 +126,11 @@ int ut_changecase(char *s, char up)
 
 int ut_hexdump(FILE *f, void *buf, size_t size)
 {
-  int i, j;
+  size_t i, j;
 
   for(i = 0; i < size; i += 16) {
 
-    fprintf(f, "%04X : ", i);
+    fprintf(f, "%04X : ", (uint32_t)i);
 
     for (j = 0; j < 16 && i + j < size; j++)
       fprintf(f, "%2.2X ", ((uint8_t*)buf)[i + j]);

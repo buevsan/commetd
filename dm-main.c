@@ -23,7 +23,7 @@
 #include "libdio.h"
 
 #define MAXEVENTS_PERRECEIVER 200
-#define MAXCLIENTS 1024
+#define MAXTHREADS 1024
 #define THREADBUFSIZE 20000
 #define THREADSTACKSIZE 40
 
@@ -46,6 +46,7 @@ typedef struct dm_prm_s
   uint16_t event_timer;
   uint16_t rd_expire_timer;
   uint16_t redisdb;
+  uint16_t get_event_sleep;
   char bdprefix[33];
   char logfilename[128];
   char cookiename[33];
@@ -157,43 +158,49 @@ dm_vars_t dm_vars;
 #define LOG(format, ...) MSG("Commetd: "format, ##__VA_ARGS__)
 
 #ifdef DM_DEBUG
-#define DBGL(level, format, ...) debug_print(&dm_vars.dbg, 1+level, "DBG: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
+#define DBGL(level, format, ...) debug_print(&dm_vars.dbg, 1+level, "DBG: %lu: %s: "format"\n", pthread_self(),__FUNCTION__, ##__VA_ARGS__)
 #define DBG(format, ...) DBGL(1, format, ##__VA_ARGS__);
 #else
 #define DBG(format, ...)
 #define DBGL(l, ...)
 #endif
 
-#define ERR_OK 200
-#define ERR_WRONG_SYNTAX  500
-#define ERR_WRONG_MANDATORY_ITEM 5000
-#define ERR_DATABASE  5001
-#define ERR_UNKNOWN_COMMAND  5002
-#define ERR_TIMEOUT  408
-#define ERR_ACCESS   403
+#define ERR_OK 0
+#define ERR_WRONG_SYNTAX  1
+#define ERR_WRONG_MANDATORY_ITEM 2
+#define ERR_DATABASE  3
+#define ERR_UNKNOWN_COMMAND  4
+#define ERR_TIMEOUT  5
+#define ERR_ACCESS   6
+
+#define ANS_OK 200
+#define ANS_ERROR  500
+#define ANS_TIMEOUT  408
+#define ANS_ACCESS   403
 
 typedef struct {
   int code;
+  int anscode;
   char *msg;
 } err_table_item_t;
 
 err_table_item_t dm_err_table[] = {
-  { ERR_OK, "OK" },
-  { ERR_WRONG_SYNTAX, "Wrong syntax"},
-  { ERR_WRONG_MANDATORY_ITEM, "Wrong or absent mandatory item"},
-  { ERR_DATABASE, "Database operation failed"},
-  { ERR_UNKNOWN_COMMAND, "Unknown command"},
-  { ERR_TIMEOUT, "Operation timeout"},
-  { ERR_ACCESS, "Access violation"}
+  { ERR_OK, ANS_OK, "OK" },
+  { ERR_WRONG_SYNTAX, ANS_ERROR, "Wrong syntax"},
+  { ERR_WRONG_MANDATORY_ITEM, ANS_ERROR, "Wrong or absent mandatory item"},
+  { ERR_DATABASE, ANS_ERROR, "Database operation failed"},
+  { ERR_UNKNOWN_COMMAND, ANS_ERROR, "Unknown command"},
+  { ERR_TIMEOUT, ANS_TIMEOUT, "Operation timeout"},
+  { ERR_ACCESS, ANS_ACCESS, "Access violation"}
 };
 
-char *dm_get_err_msg(int code)
+err_table_item_t *dm_get_err_msg(int code)
 {
   int i;
   for (i=0; i<sizeof(dm_err_table)/sizeof(err_table_item_t);++i)
     if (dm_err_table[i].code == code)
-      return dm_err_table[i].msg;
-  return "Unknown error";
+      return &dm_err_table[i];
+  return 0;
 }
 
 void dm_init_thpool(dm_thpool_t *ta, void* (*th_fun)(void*), uint8_t type, dm_th_pipe_t *p, uint16_t max)
@@ -262,11 +269,12 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.cliport=7777;
   v->prm.sleeptimer=1000;
   v->prm.minths = 300;
-  v->prm.maxths = MAXCLIENTS;
+  v->prm.maxths = MAXTHREADS;
   v->prm.redisdb = 3;
   v->prm.redisport = 6379;  
   v->prm.event_timer = 5;
   v->prm.rd_expire_timer = 60;
+  v->prm.get_event_sleep = 100;
   strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
   strncpy(v->prm.logfilename, "/var/log/commetd.log", sizeof(v->prm.logfilename));
   strncpy(v->prm.cookiename, "PHPSESSID", sizeof(v->prm.cookiename));
@@ -340,7 +348,7 @@ int dm_init(dm_vars_t *v)
   }
 
   v->rdReply = redisCommand(v->rdCtx, "select %u", v->prm.redisdb);
-  if (!v->rdReply) {
+  if (!(v->rdReply)) {
     ERR("Can't select db '%u'!", v->prm.redisdb);
     return -1;
   }
@@ -890,9 +898,11 @@ json_object * dm_mk_jsonanswer_text(int code, char *text)
 
 json_object * dm_mk_jsonanswer(int code)
 {
-  if (!code)
-    code=ERR_OK;
-  return dm_mk_jsonanswer_text(code, dm_get_err_msg(code));
+  err_table_item_t *i = dm_get_err_msg(code);
+  if (i)
+    return dm_mk_jsonanswer_text(i->anscode, i->msg);
+  else
+    return dm_mk_jsonanswer_text(ANS_ERROR, "Unknown error");
 }
 
 const char *dm_get_json_str_value(json_object *req, char *name)
@@ -1082,7 +1092,7 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
   char event_time[32];
   char s[16];
   char key[64];
-  char value[256];
+  /*char value[256];*/
   time_t t;
 
   DBG("");
@@ -1124,9 +1134,8 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   o = dm_mk_event_record(event_time, event_type, receiver, "0", edata);
 
-  snprintf(value, sizeof(value), "%s", json_object_to_json_string(o));
-
-  DBG("key:'%s'' val:'%s'", key, value);
+  /*snprintf(value, sizeof(value), "%s", json_object_to_json_string(o));*/
+  DBG("key:'%s'' val:'%s'", key, json_object_to_json_string(o));
 
 
   v->rdReply = redisCommand(v->rdCtx, "set %s %s", key, json_object_to_json_string(o));
@@ -1241,7 +1250,7 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
   snprintf(key, sizeof(key), "%s:%s:*", prefix, receiver);
 
   v->rdReply = redisCommand(v->rdCtx, "keys %s ", key);
-  if (!v->rdReply) {
+  if (!(v->rdReply)) {
     r=ERR_DATABASE;
     ERR("Can't get redis keys '%s'", key);
     goto exit;
@@ -1384,6 +1393,8 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     r=ERR_ACCESS;
     goto exit;
   }
+  pthread_mutex_unlock(&v->rdmtx);
+
 
   min_event_time = dm_get_json_str_value(req, "event_last_time");
   not_modified = dm_get_json_str_value(req, "not_modified");
@@ -1400,9 +1411,11 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     /*dm_set_event_db_lasttime(v, prefix, receiver, (uint32_t)lasttime);*/
 
     cnt = sizeof(nkeys)>>2;
-    r = dm_get_all_events(v, prefix, receiver, (min_event_time)?1:0, nkeys, &cnt);
+    pthread_mutex_lock(&v->rdmtx);
+    r = dm_get_all_events(v, prefix, receiver, (min_event_time)?0:1, nkeys, &cnt);
     if (r)
       goto exit;
+    pthread_mutex_unlock(&v->rdmtx);
 
     mintime=0;
     if (min_event_time) {
@@ -1413,6 +1426,9 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     }
 
     u32 = dm_find_event(nkeys, cnt, mintime);
+
+    if (!u32)
+      usleep(100);
 
     time(&t);
 
@@ -1427,6 +1443,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   DBG("found event_time %u", *u32);
 
+  pthread_mutex_lock(&v->rdmtx);
   event_data_o = dm_get_event_db_data(v, &v->rdReply, prefix, receiver, *u32);
   if (!event_data_o) {
     r=ERR_DATABASE;
@@ -1468,6 +1485,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   }
 
+
   freeReplyObject(v->rdReply);
 
 exit:
@@ -1483,7 +1501,6 @@ exit:
   }
 
   if (!r) {
-
     if (event_data_o)
       json_object_object_add((*ans), "event_data", event_data_o);
   }
@@ -2108,29 +2125,29 @@ exit:
 
   if (thd->p.fcgi_http_debug) {
 
-   dm_fcgi_out_strs(r, fcgi_answer);
-   FCGX_PutS(server_name, r->out);
-   dm_fcgi_out_strs(r, &fcgi_answer[10]);
+    dm_fcgi_out_strs(r, fcgi_answer);
+    FCGX_PutS(server_name, r->out);
+    dm_fcgi_out_strs(r, &fcgi_answer[10]);
 
-   dm_fcgi_out_strs_n(r, r->envp);
+    dm_fcgi_out_strs_n(r, r->envp);
 
-   FCGX_PutS("<p> QUERY: ", r->out);
-   FCGX_PutS(query_string, r->out);
-   FCGX_PutS("</p>", r->out);
+    FCGX_PutS("<p> QUERY: ", r->out);
+    FCGX_PutS(query_string, r->out);
+    FCGX_PutS("</p>", r->out);
 
-   FCGX_PutS("<p> POST: ", r->out);
-   FCGX_PutS(thd->buf, r->out);
-   FCGX_PutS("</p>", r->out);
+    FCGX_PutS("<p> POST: ", r->out);
+    FCGX_PutS(thd->buf, r->out);
+    FCGX_PutS("</p>", r->out);
 
-   FCGX_PutS("<p> ANSWER: ", r->out);
-   FCGX_PutS(json_object_to_json_string(ans), r->out);
-   FCGX_PutS("</p>", r->out);
-   dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
+    FCGX_PutS("<p> ANSWER: ", r->out);
+    FCGX_PutS(json_object_to_json_string(ans), r->out);
+    FCGX_PutS("</p>", r->out);
+    dm_fcgi_out_strs_n(r, &fcgi_answer[12]);
 
   } else {
-   FCGX_PutS(fcgi_answer_prefix, r->out);
-   FCGX_PutS(json_object_to_json_string(ans), r->out);
-   FCGX_PutS(fcgi_answer_suffix, r->out);
+    FCGX_PutS(fcgi_answer_prefix, r->out);
+    FCGX_PutS(json_object_to_json_string(ans), r->out);
+    FCGX_PutS(fcgi_answer_suffix, r->out);
   }
 
   json_object_put(req);

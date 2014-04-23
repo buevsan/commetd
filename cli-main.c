@@ -41,7 +41,7 @@ cli_vars_t cli_vars;
 #define MSG(format, ...) debug_print(&cli_vars.dbg, 0, format"\n", ##__VA_ARGS__)
 
 #ifdef CLI_DEBUG
-#define DBGL(level, format, ...) debug_print(&cli_vars.dbg, 1+level, "DBG: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
+#define DBGL(level, format, ...) debug_print(&cli_vars.dbg, 1+level, "DBG: %u: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
 #define DBG(format, ...) DBGL(1, format, ##__VA_ARGS__);
 #else
 #define DBG(format, ...)
@@ -169,6 +169,7 @@ void cli_print_help(void)
          "-t <timeout> - command timeout\n"
          "-d <level> - debug level\n"
          "-c <command> - command to execute\n"
+         "-p <port> - TCP port\n"
          "-j - json command format\n");
 }
 
@@ -209,7 +210,7 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
   int optidx;
 
   while (1) {
-    c = getopt_long(argc, argv, "jhd:c:t:", loptions,  &optidx);
+    c = getopt_long(argc, argv, "jhd:c:t:p:", loptions,  &optidx);
     if (c==-1)
       break;
     switch (c) {
@@ -231,6 +232,12 @@ int cli_handle_args(cli_prm_t * p, int argc, char **argv)
       case 't':
         if (ut_s2n10(optarg, &p->cm_timeout))
           return -1;
+      break;
+      case 'p':
+        if (ut_s2n10(optarg, &p->dm_port)) {
+          printf("Wrong port!\n");
+          return -1;
+        }
       break;
       case 'h':
        cli_print_help();

@@ -1381,7 +1381,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     goto exit;
   }
 
-  min_event_time = dm_get_json_str_value(req, "min_event_time");
+  min_event_time = dm_get_json_str_value(req, "last_event_time");
   not_modified = dm_get_json_str_value(req, "not_modified");
 
   prefix = dm_get_json_str_value(req, "prefix");
@@ -1966,13 +1966,21 @@ json_object *dm_qs2json(char *qs)
 int dm_get_cookie_value(char *cookstr, char *name, char *value)
 {
   char *ptr1, *cookie, *n, *ptr2;
+  int l,i;
 
   value[0]=0;
 
   while ((cookie = strtok_r(cookstr, ";", &ptr1))) {
     cookstr=0;
-    DBGL(4, "cookie:'%s'",cookie);
+    DBGL(3, "cookie:'%s'",cookie);
     n = strtok_r(cookie, "=", &ptr2);
+
+    /* delete space */
+    l=strlen(n);
+    for (i=0;i<l;++i)
+      if (n[0]==' ')
+        n++;
+
     if (!strcmp(n, name)) {
       strcpy(value, strtok_r(0, "=", &ptr2));
       return 0;

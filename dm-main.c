@@ -878,9 +878,6 @@ json_object * dm_mk_jsonanswer_text(int code, char *text)
 {
   json_object * answer_o = json_object_new_object();
 
-  if (!code)
-    code=ERR_OK;
-
   json_object * code_o = json_object_new_int(code);
   json_object_object_add(answer_o, "code", code_o);
   
@@ -893,6 +890,8 @@ json_object * dm_mk_jsonanswer_text(int code, char *text)
 
 json_object * dm_mk_jsonanswer(int code)
 {
+  if (!code)
+    code=ERR_OK;
   return dm_mk_jsonanswer_text(code, dm_get_err_msg(code));
 }
 

@@ -1252,13 +1252,14 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
   rcnt=0;
   for (i=0; i<(*cnt); ++i) {
     reply = v->rdReply->element[i];
-    DBGL(3,"event_key: '%s'", reply->str);
     c = strrchr(reply->str, ':');
     if (!c)
       continue;
 
     if (ut_s2nl10(c+1, &item[rcnt]))
       continue;
+    DBGL(3,"event_key: '%s'", reply->str);
+
     /*item[i]=(uint32_t)strtoul(c+1, 0, 10);*/
 
     if (checkreceived) {
@@ -1359,9 +1360,9 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   const char *receiver;
   const char *min_event_time, *not_modified, *prefix;
   json_object *event_data_o=0;
-  uint32_t nkeys[MAXEVENTS_PERRECEIVER], *u32, mintime, lasttime;
+  uint32_t nkeys[MAXEVENTS_PERRECEIVER], *u32, mintime;
   uint16_t cnt;
-  time_t st,t;
+  time_t st,t, lasttime=0;
 
   DBG("");
 
@@ -1387,12 +1388,12 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   if (!prefix)
     prefix = v->prm.bdprefix;
 
-  lasttime=0;
-  dm_get_event_db_lasttime(v, prefix, receiver, &lasttime);
-
   time(&st);
 
   do {
+
+    time(&lasttime);
+    /*dm_set_event_db_lasttime(v, prefix, receiver, (uint32_t)lasttime);*/
 
     cnt = sizeof(nkeys)>>2;
     r = dm_get_all_events(v, prefix, receiver, (min_event_time)?1:0, nkeys, &cnt);
@@ -1412,6 +1413,8 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     time(&t);
 
   } while ((!u32) && ((t-st) < v->prm.event_timer));
+
+
 
   if (!u32) {
     r = ERR_TIMEOUT;
@@ -1461,9 +1464,6 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   }
 
-  time(&t);
-  dm_set_event_db_lasttime(v, prefix, receiver, (uint32_t)t);
-
   freeReplyObject(v->rdReply);
 
 exit:
@@ -1473,13 +1473,12 @@ exit:
 
   (*ans)=dm_mk_jsonanswer(r);  
 
+  if (lasttime) {
+    snprintf(lasttime_s, sizeof(lasttime_s), "%u", (uint32_t)lasttime);
+   dm_add_json_string(*ans, "event_last_time", lasttime_s);
+  }
 
   if (!r) {
-
-    if (lasttime) {
-      snprintf(lasttime_s, sizeof(lasttime_s), "%u", lasttime);
-      dm_add_json_string(*ans, "event_last_time", lasttime_s);
-    }
 
     if (event_data_o)
       json_object_object_add((*ans), "event_data", event_data_o);
@@ -1799,8 +1798,8 @@ char *fcgi_answer[] =
   0
 };
 
-char *fcgi_answer_prefix="Content-type: text/html\r\n\r\n<html><body>";
-char *fcgi_answer_suffix="</body></html>";
+char *fcgi_answer_prefix="Content-type: application/json\r\n\r\n";
+char *fcgi_answer_suffix="";
 
 void dm_fcgi_out_strs(FCGX_Request *r, char **s)
 {

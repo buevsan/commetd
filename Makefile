@@ -1,4 +1,4 @@
-CFLAGS+=-I. -DDM_DEBUG -DCLI_DEBUG -Wall
+CFLAGS+=-I. -DDM_DEBUG -DCLI_DEBUG -Wall -Wextra
 LIBS=-ljson-c -lfcgi -lpthread -lhiredis
 
 %: %.c
@@ -6,7 +6,7 @@ LIBS=-ljson-c -lfcgi -lpthread -lhiredis
 
 all: commetd commet-cli
 
-commetd: dm-main.o utils.o debug.o libdio.o
+commetd: dm-main.o utils.o debug.o libdio.o db.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o commetd $^ $(LIBS)
 
 commet-cli: cli-main.o utils.o debug.o libdio.o 	

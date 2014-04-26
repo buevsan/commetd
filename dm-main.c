@@ -1441,6 +1441,8 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     goto exit;
   }
 
+  lasttime = (*u32);
+
   DBG("found event_time %u", *u32);
 
   pthread_mutex_lock(&v->rdmtx);

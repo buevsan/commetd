@@ -41,7 +41,9 @@ cli_vars_t cli_vars;
 #define MSG(format, ...) debug_print(&cli_vars.dbg, 0, format"\n", ##__VA_ARGS__)
 
 #ifdef CLI_DEBUG
-#define DBGL(level, format, ...) debug_print(&cli_vars.dbg, 1+level, "DBG: %u: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
+uint64_t dct=0, dlt=0;
+#define DBGL(level, format, ...) \
+  debug_print(&cli_vars.dbg, 1+level, "DBG: %s: "format"\n", __FUNCTION__, ##__VA_ARGS__)
 #define DBG(format, ...) DBGL(1, format, ##__VA_ARGS__);
 #else
 #define DBG(format, ...)
@@ -56,7 +58,7 @@ int cli_init_vars(cli_vars_t *v)
   v->prm.dlevel=0;
   v->prm.dm_port=7777;
   v->prm.dm_addr.s_addr = inet_addr("127.0.0.1");
-  v->prm.cm_timeout = 5000;
+  v->prm.cm_timeout = 5500;
   return 0;
 }
 

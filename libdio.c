@@ -222,6 +222,13 @@ int libdio_signal(int signum, void (*handler)(int))
   return 0;
 }
 
+void libdio_settimeval(struct timeval *tv, uint16_t timer)
+{
+  memset(tv, 0 ,sizeof(struct timeval));
+  tv->tv_sec = timer/1000;
+  tv->tv_usec = (timer - (tv->tv_sec)*1000)*1000;
+}
+
 int libdio_waitfd(int fd, uint16_t timer, char m)
 {
   fd_set set;
@@ -234,10 +241,8 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
     DBGL(4, "wait fd: %i for '%c' timer %u", fd, m, timer);
 
     FD_ZERO(&set);
-    FD_SET(fd, &set);
-    memset(&tv, 0 ,sizeof(tv));
-    tv.tv_sec = 0;
-    tv.tv_usec = 1000*timer;
+    FD_SET(fd, &set);    
+    libdio_settimeval(&tv, timer);
 
     r = select(fd+1, (m=='r')?&set:0, (m=='w')?&set:0, 0, &tv);
 

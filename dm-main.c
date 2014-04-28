@@ -882,9 +882,12 @@ int dm_json_check(json_object *obj, dm_json_obj_t *table)
   return 0;
 }
 
-json_object * dm_mk_jsonanswer_text(int code, char *text)
-{
-  json_object * answer_o = json_object_new_object();
+json_object * dm_mk_jsonanswer_text(json_object *toobj, int code, char *text)
+{    
+  json_object * answer_o;
+
+  if (toobj) answer_o=toobj;
+  else answer_o=json_object_new_object();
 
   json_object * code_o = json_object_new_int(code);
   json_object_object_add(answer_o, "code", code_o);
@@ -900,9 +903,18 @@ json_object * dm_mk_jsonanswer(int code)
 {
   err_table_item_t *i = dm_get_err_msg(code);
   if (i)
-    return dm_mk_jsonanswer_text(i->anscode, i->msg);
+    return dm_mk_jsonanswer_text(0, i->anscode, i->msg);
   else
-    return dm_mk_jsonanswer_text(ANS_ERROR, "Unknown error");
+    return dm_mk_jsonanswer_text(0, ANS_ERROR, "Unknown error");
+}
+
+void dm_add_jsonanswer(json_object *toobj, int code)
+{
+  err_table_item_t *i = dm_get_err_msg(code);
+  if (i)
+    dm_mk_jsonanswer_text(toobj, i->anscode, i->msg);
+  else
+    dm_mk_jsonanswer_text(toobj, ANS_ERROR, "Unknown error");
 }
 
 const char *dm_get_json_str_value(json_object *req, char *name)
@@ -1084,6 +1096,15 @@ json_object *dm_mk_event_record(const char *event_time, const char *event_type,
   return o;
 }
 
+
+void dm_getcurtime(uint64_t *t)
+{
+  struct timeval tv;
+  memset(&tv, 0, sizeof(tv));
+  gettimeofday(&tv, 0);
+  (*t) = tv.tv_sec*1000+tv.tv_usec/1000;
+}
+
 int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
 {
   int r=0;
@@ -1092,14 +1113,13 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
   char event_time[32];
   char s[16];
   char key[64];
-  /*char value[256];*/
-  time_t t;
+  uint64_t t;
 
   DBG("");
 
   pthread_mutex_lock(&v->rdmtx);
 
-  time(&t);
+  dm_getcurtime(&t);
 
   if (dm_json_check(req, set_event_items)) {
     r=ERR_WRONG_MANDATORY_ITEM;
@@ -1129,7 +1149,7 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
     dbid = s;
   }
 
-  snprintf(event_time, sizeof(event_time), "%u", (uint32_t)t);
+  snprintf(event_time, sizeof(event_time), "%llu", t);
   snprintf(key, sizeof(key), "%s:%s:%s", prefix, receiver, event_time);
 
   o = dm_mk_event_record(event_time, event_type, receiver, "0", edata);
@@ -1171,9 +1191,9 @@ exit:
 
 int dm_compare_event_keys(const void *i1, const void *i2)
 {
-  uint32_t u1, u2;
-  u1=*((uint32_t *)i1);
-  u2=*((uint32_t *)i2);
+  uint64_t u1, u2;
+  u1=*((uint64_t *)i1);
+  u2=*((uint64_t *)i2);
 
   if (u1<u2)
     return -1;
@@ -1185,12 +1205,12 @@ int dm_compare_event_keys(const void *i1, const void *i2)
 }
 
 json_object * dm_get_event_db_data(dm_vars_t *v, redisReply **rdReplyP, const char *prefix,
-                                   const char *receiver, uint32_t utime)
+                                   const char *receiver, uint64_t utime)
 {
   json_object *o=0;
   redisReply *rdReply = (*rdReplyP);
 
-  rdReply = redisCommand(v->rdCtx, "get %s:%s:%u ", prefix, receiver, utime);
+  rdReply = redisCommand(v->rdCtx, "get %s:%s:%llu ", prefix, receiver, utime);
   if (!rdReply) {
     ERR("Can't get founded event");
     goto exit;
@@ -1215,7 +1235,7 @@ exit:
 }
 
 int dm_get_event_db_received_flag(dm_vars_t *v, const char *prefix,
-                                  const char *receiver, uint32_t utime, uint16_t *received)
+                                  const char *receiver, uint64_t utime, uint16_t *received)
 {
   int r = ERR_DATABASE;
   json_object *o;
@@ -1241,7 +1261,7 @@ exit:
 }
 
 int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
-                      char checkreceived, uint32_t *item, uint16_t *cnt)
+                      char checkreceived, uint64_t *item, uint16_t *cnt)
 {
   int r=0;
   uint16_t i, rcnt, received;
@@ -1257,7 +1277,11 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
   }
 
   DBGL(3,"redis reply: t:%i e:%i", v->rdReply->type, v->rdReply->elements);
-  (*cnt) = ((*cnt) < v->rdReply->elements)?(*cnt):v->rdReply->elements;
+
+  if (((*cnt) < v->rdReply->elements)) {
+    ERR("To many events per user > %u", (*cnt));
+  } else
+   (*cnt) = v->rdReply->elements;
 
   redisReply *reply;
   char *c;
@@ -1267,9 +1291,9 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
     reply = v->rdReply->element[i];
     c = strrchr(reply->str, ':');
     if (!c)
-      continue;
+      continue;    
 
-    if (ut_s2nl10(c+1, &item[rcnt]))
+    if (ut_s2nll10(c+1, &item[rcnt]))
       continue;
     DBGL(3,"event_key: '%s'", reply->str);
 
@@ -1281,17 +1305,19 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
       if (received)
         continue;
     }
-    DBGL(3,"added: '%u'", item[rcnt]);
+    DBGL(3,"added: '%llu'", item[rcnt]);
     rcnt++;
   }
 
   if ((rcnt)>1)
-    qsort(item, rcnt, 4, dm_compare_event_keys);
+    qsort(item, rcnt, sizeof(item[0]), dm_compare_event_keys);
 
   for (i=0; i<rcnt; ++i)
-    DBGL(2, "event_time: '%u'", item[i]);
+    DBGL(2, "event_time: %u '%llu'", i, item[i]);
 
 exit:
+
+  DBG("");
 
   if (v->rdReply)
     freeReplyObject(v->rdReply);
@@ -1301,8 +1327,8 @@ exit:
   return r;
 }
 
-uint32_t *dm_find_event(uint32_t *item, uint16_t cnt, uint32_t min)
-{
+uint64_t *dm_find_event(uint64_t *item, uint16_t cnt, uint64_t min)
+{    
   uint16_t i;
   if (!cnt)
     return 0;
@@ -1311,21 +1337,21 @@ uint32_t *dm_find_event(uint32_t *item, uint16_t cnt, uint32_t min)
     return &item[0];
 
   for (i=0;i<cnt;++i)
-    if (item[i]>=min)
+    if (item[i]>min)
       return &item[i];
 
   return 0;
 }
 
-int dm_set_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *receiver, uint32_t utime)
+int dm_set_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *receiver, uint64_t utime)
 {
   int r=0;
   redisReply *rdReply;
 
-  rdReply = redisCommand(v->rdCtx, "set %s:%s:lasttime %u", prefix, receiver, utime);
+  rdReply = redisCommand(v->rdCtx, "set %s:%s:lasttime %llu", prefix, receiver, utime);
   if (!rdReply) {
     r = ERR_DATABASE;
-    ERR("Can't set redis key %s:%s:lasttime value '%u'", prefix, receiver, utime);
+    ERR("Can't set redis key %s:%s:lasttime value '%llu'", prefix, receiver, utime);
     goto exit;
   }
   freeReplyObject(rdReply);
@@ -1335,7 +1361,7 @@ exit:
   return r;
 }
 
-int dm_get_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *receiver, uint32_t *utime)
+int dm_get_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *receiver, uint64_t *utime)
 {
   int r=0;
   redisReply *rdReply;
@@ -1349,11 +1375,11 @@ int dm_get_event_db_lasttime(dm_vars_t *v, const char *prefix, const char *recei
 
   if (rdReply->type!=REDIS_REPLY_STRING) {
     r = ERR_DATABASE;
-    ERR("Last event time data not a string %i", rdReply->type);
+    ERR("Last event lasttime data not a string %i", rdReply->type);
     goto exit;
   }
 
-  if (ut_s2nl10(rdReply->str, utime)) {
+  if (ut_s2nll10(rdReply->str, utime)) {
     r = ERR_DATABASE;
     ERR("Wrong last event time '%s'", rdReply->str);
   }
@@ -1373,9 +1399,9 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   const char *receiver;
   const char *min_event_time, *not_modified, *prefix;
   json_object *event_data_o=0;
-  uint32_t nkeys[MAXEVENTS_PERRECEIVER], *u32, mintime;
+  uint64_t nkeys[MAXEVENTS_PERRECEIVER], *u32, mintime;
   uint16_t cnt;
-  time_t st,t, lasttime=0;
+  uint64_t st,t, lasttime=0;
 
   DBG("");
 
@@ -1403,14 +1429,14 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
   if (!prefix)
     prefix = v->prm.bdprefix;
 
-  time(&st);
+  dm_getcurtime(&st);
 
   do {
 
-    time(&lasttime);
+    dm_getcurtime(&lasttime);
     /*dm_set_event_db_lasttime(v, prefix, receiver, (uint32_t)lasttime);*/
 
-    cnt = sizeof(nkeys)>>2;
+    cnt = MAXEVENTS_PERRECEIVER;
     pthread_mutex_lock(&v->rdmtx);
     r = dm_get_all_events(v, prefix, receiver, (min_event_time)?0:1, nkeys, &cnt);
     if (r)
@@ -1419,7 +1445,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
     mintime=0;
     if (min_event_time) {
-      if (ut_s2nl10(min_event_time, &mintime)) {
+      if (ut_s2nll10(min_event_time, &mintime)) {
         ERR("Wrong min_event_time!");
         goto exit;
       }
@@ -1430,9 +1456,10 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     if (!u32)
       usleep(100);
 
-    time(&t);
+    dm_getcurtime(&t);
 
-  } while ((!u32) && ((t-st) < v->prm.event_timer));
+  } while ((!u32) && ((t-st) < (v->prm.event_timer*1000)));
+
 
 
 
@@ -1443,7 +1470,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
   lasttime = (*u32);
 
-  DBG("found event_time %u", *u32);
+  DBG("found event_time %llu", *u32);
 
   pthread_mutex_lock(&v->rdmtx);
   event_data_o = dm_get_event_db_data(v, &v->rdReply, prefix, receiver, *u32);
@@ -1463,7 +1490,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
     redisReply *rdReply;
 
-    rdReply = redisCommand(v->rdCtx, "set %s:%s:%u %s", prefix, receiver, *u32,
+    rdReply = redisCommand(v->rdCtx, "set %s:%s:%llu %s", prefix, receiver, *u32,
                              json_object_to_json_string(event_data_o));
 
     if (!rdReply) {
@@ -1474,7 +1501,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     }
     freeReplyObject(rdReply);
 
-    rdReply = redisCommand(v->rdCtx, "expire %s:%s:%u %u", prefix, receiver, *u32,
+    rdReply = redisCommand(v->rdCtx, "expire %s:%s:llu %u", prefix, receiver, *u32,
                            v->prm.rd_expire_timer);
     if (!rdReply) {
       r = ERR_DATABASE;
@@ -1494,17 +1521,19 @@ exit:
 
 
   pthread_mutex_unlock(&v->rdmtx);
+  DBG("qq3");
 
-  (*ans)=dm_mk_jsonanswer(r);  
-
-  if (lasttime) {
-    snprintf(lasttime_s, sizeof(lasttime_s), "%u", (uint32_t)lasttime);
-   dm_add_json_string(*ans, "event_last_time", lasttime_s);
+  if ((!r) && (event_data_o)) {
+    dm_add_jsonanswer(event_data_o, r);
+    (*ans) = event_data_o;
+    /*json_object_object_add((*ans), "event_data", event_data_o);*/
+  } else {
+    (*ans)=dm_mk_jsonanswer(r);
   }
 
-  if (!r) {
-    if (event_data_o)
-      json_object_object_add((*ans), "event_data", event_data_o);
+  if (lasttime) {
+    snprintf(lasttime_s, sizeof(lasttime_s), "%llu", lasttime);
+    dm_add_json_string(*ans, "event_last_time", lasttime_s);
   }
 
   return r;
@@ -2306,6 +2335,13 @@ int dm_handle_timeout(dm_vars_t*v)
   return 0;
 }
 
+void set_timeval(struct timeval *tv, uint16_t timer)
+{
+  memset(tv, 0 ,sizeof(struct timeval));
+  tv->tv_sec = timer/1000;
+  tv->tv_usec = (timer - (tv->tv_sec)*1000)*1000;
+}
+
 int main(int argc, char **argv)
 {
   dm_init_vars(&dm_vars);
@@ -2339,9 +2375,7 @@ int main(int argc, char **argv)
   while (1) {
 
     /* wait for event */
-    memset(&tv, 0 ,sizeof(tv));
-    tv.tv_sec=0;
-    tv.tv_usec=1000*dm_vars.prm.sleeptimer;
+    set_timeval(&tv, dm_vars.prm.sleeptimer);
 
     rset = set;
     int maxfd,s;

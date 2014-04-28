@@ -114,6 +114,18 @@ int ut_s2nl10(const char *s, uint32_t *n)
   return 0;
 }
 
+int ut_s2nll10(const char *s, uint64_t *n)
+{
+  uint8_t i=0;
+  while (s[i])
+    if (!isdigit(s[i++]))
+      return 1;
+
+  (*n) = strtoull(s, 0, 10);
+  return 0;
+}
+
+
 int ut_changecase(char *s, char up)
 {
   int i = 0;

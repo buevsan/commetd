@@ -1521,7 +1521,6 @@ exit:
 
 
   pthread_mutex_unlock(&v->rdmtx);
-  DBG("qq3");
 
   if ((!r) && (event_data_o)) {
     dm_add_jsonanswer(event_data_o, r);
@@ -1881,8 +1880,9 @@ void dm_fcgi_out_str_n(FCGX_Request *r, char *s)
 int dm_fcgi_thread_accept(void *thdata)
 {
   dm_fcgi_thdata_t *thd = (dm_fcgi_thdata_t *)thdata;
-  if (FCGX_Accept_r(&thd->req)) {
-    ERR("FCGX_Accept_r");
+  int r = FCGX_Accept_r(&thd->req);
+  if (r) {
+    ERR("FCGX_Accept_r: %i", r);
     return -1;
   }
   return 0;

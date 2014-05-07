@@ -1635,22 +1635,38 @@ int dm_process_json_cmd_buf(uint8_t *buf)
 {
   libdio_msg_str_cmd_r_t *rshdr = (libdio_msg_str_cmd_r_t *)buf;
   json_object *req=0, *ans=0, *o;
-  int r;
+  int r=0;
+
+  DBG("");
+
   req = json_tokener_parse(((libdio_msg_str_cmd_t*)buf)->cmd);
 
-  /* add interface */
 
-  if (req) {
-   o = json_object_new_string("cli");
-   json_object_object_add(req, "interface", o);
+
+  if ((!req) || (json_object_get_type(req)!=json_type_object)) {
+    r = ERR_WRONG_SYNTAX;
+    ans = dm_mk_jsonanswer(r);
+    goto exit;
   }
+
+
+  /* add interface */
+  o = json_object_new_string("cli");
+  json_object_object_add(req, "interface", o);
 
   r = dm_process_json_cmd(req, &ans);
 
-  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), r?0xF1:0);  
+exit:
 
-  json_object_put(ans);
-  json_object_put(req);
+  DBG("ans: %s", json_object_to_json_string(ans));
+
+  LIBDIO_FILLJSONRESPONSE(rshdr, json_object_to_json_string(ans), 0);
+
+  if (ans)
+    json_object_put(ans);
+  if (req)
+    json_object_put(req);
+
   return 0;
 }
 

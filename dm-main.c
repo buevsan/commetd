@@ -354,6 +354,13 @@ int dm_init(dm_vars_t *v)
   }
   freeReplyObject(v->rdReply);
 
+  v->rdReply = redisCommand(v->rdCtx, "flushdb");
+  if (!(v->rdReply)) {
+    ERR("Can't flush db '%u'!", v->prm.redisdb);
+    return -1;
+  }
+  freeReplyObject(v->rdReply);
+
 
   /* open cli socket */
   struct sockaddr_in sa;  
@@ -402,15 +409,15 @@ int dm_init(dm_vars_t *v)
   dm_cli_thprm_t cli_prm;
   cli_prm.fd = v->cli_fd;
 
+  if (!v->prm.foreground) {
+    DBGL(2, "Become a daemon...");
+    daemon(0, 0);
+  }
+
   /* start threads */
   for (i=0; i<v->prm.minths; ++i) {      
     dm_thpool_add(&v->clipool, &cli_prm, sizeof(cli_prm));
     dm_thpool_add(&v->fcgipool, &fcgi_prm, sizeof(fcgi_prm));
-  }
-
-  if (!v->prm.foreground) {
-    DBGL(2, "Become a daemon...");
-    daemon(0, 0);
   }
 
 
@@ -970,7 +977,7 @@ int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
   v->rdReply = redisCommand(v->rdCtx, "hset %s hash %s", key, hash);
   if (!v->rdReply) {
     r = ERR_DATABASE;
-    ERR("Can't set redis key '%s' to '%s'", key, hash);
+    ERR("Can't hset redis key '%s' to '%s'", key, hash);
     goto exit;
   }
   freeReplyObject(v->rdReply);
@@ -1501,7 +1508,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     }
     freeReplyObject(rdReply);
 
-    rdReply = redisCommand(v->rdCtx, "expire %s:%s:llu %u", prefix, receiver, *u32,
+    rdReply = redisCommand(v->rdCtx, "expire %s:%s:%llu %u", prefix, receiver, *u32,
                            v->prm.rd_expire_timer);
     if (!rdReply) {
       r = ERR_DATABASE;
@@ -2070,11 +2077,19 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, uint32_t *receiverid)
 
   DBG("cookies:'%s'",cookies);
 
-  if (dm_get_cookie_value(cookies, v->prm.cookiename, hash))
-    return 1;
+  pthread_mutex_lock(&v->rdmtx);
 
-  if (!hash[0])
-    return 1;
+  if (dm_get_cookie_value(cookies, v->prm.cookiename, hash)) {
+    ERR("Wrong or absent cookie!");
+    r = ERR_ACCESS;
+    goto exit;
+  }
+
+  if (!hash[0]) {
+    ERR("Empty hash value!");
+    r = ERR_ACCESS;
+    goto exit;
+  }
 
   DBG("cookie hash: %s ", hash);
 
@@ -2083,26 +2098,30 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, uint32_t *receiverid)
 
   snprintf(key, sizeof(key), "%s:%s", prefix, hash);
 
-  pthread_mutex_lock(&v->rdmtx);
 
   v->rdReply = redisCommand(v->rdCtx, "hget %s receiver", key);
   if (!v->rdReply) {
     ERR("Can't get key '%s' from redis", key);
-    r=1;
+    r=ERR_DATABASE;
     goto exit;
   }
 
   if (v->rdReply->type != REDIS_REPLY_STRING) {
-    ERR("Not string receiver id %i", v->rdReply->type);
+    if (v->rdReply->type == REDIS_REPLY_NIL) {
+      DBG("User not found!");
+      r=ERR_ACCESS;
+    } else {
+      ERR("Not string receiver id %i", v->rdReply->type);
+      r=ERR_DATABASE;
+    }
     freeReplyObject(v->rdReply);
-    r=1;
     goto exit;
   }
 
   if (ut_s2nl10(v->rdReply->str, receiverid)) {
     ERR("Wrong receiver id");
     freeReplyObject(v->rdReply);
-    r=1;
+    r=ERR_ACCESS;
     goto exit;
   }
 
@@ -2123,6 +2142,7 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   uint32_t receiverid;
   char q_string[256];
   char receiver[32];
+  int ret;
   json_object *req=0, *ans=0, *o;
 
   #ifdef DM_DEBUG
@@ -2134,9 +2154,9 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   cookie = FCGX_GetParam("HTTP_COOKIE", r->envp);
 
   /*  get receiver from DB */
-  if (dm_get_receiver_id(v, cookie, &receiverid)) {
-    ERR("Wrong or absent cookie!");
-    ans = dm_mk_jsonanswer(ERR_ACCESS);
+  ret = dm_get_receiver_id(v, cookie, &receiverid);
+  if (ret) {
+    ans = dm_mk_jsonanswer(ret);
     goto exit;
   }  
   snprintf(receiver, sizeof(receiver), "%u", receiverid);

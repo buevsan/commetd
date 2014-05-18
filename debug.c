@@ -6,6 +6,9 @@
 
 int debug_init(dbg_desc_t *d, int level, const char *filename)
 {
+  if (!d)
+    return -1;
+
   d->buf = malloc(DEBUG_MSG_BUFSIZE);
 
   if (!d->buf)
@@ -34,6 +37,9 @@ error:
 
 void debug_free(dbg_desc_t *d)
 {
+  if (!d)
+    return -1;
+
   if ((d->file) && (d->file!=stdout)) {
     fflush(d->file);
     fclose(d->file);
@@ -49,6 +55,8 @@ void debug_free(dbg_desc_t *d)
 void debug_print(dbg_desc_t *d, int mlevel, const char *format, ...)
 {
   va_list args;
+  if (!d)
+    return -1;
 
   if ( !((d) && (d->buf) && (d->file)) )
       return;

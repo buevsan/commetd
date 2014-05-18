@@ -38,7 +38,7 @@ error:
 void debug_free(dbg_desc_t *d)
 {
   if (!d)
-    return -1;
+    return;
 
   if ((d->file) && (d->file!=stdout)) {
     fflush(d->file);
@@ -55,8 +55,9 @@ void debug_free(dbg_desc_t *d)
 void debug_print(dbg_desc_t *d, int mlevel, const char *format, ...)
 {
   va_list args;
+
   if (!d)
-    return -1;
+    return;
 
   if ( !((d) && (d->buf) && (d->file)) )
       return;

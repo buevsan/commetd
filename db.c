@@ -98,12 +98,15 @@ int db_unlock(db_t *db)
 
 int db_check_reply(db_t *db, redisReply *rdReply, int code)
 {
-  if (!rdReply)
+  if (!rdReply) {
     return 1;
+  }
 
   if (code) {
-    if (rdReply->type!=code)
+    if (rdReply->type!=code) {
+      DBG("Expected %u redis answer received %u", code, rdReply->type);
       return 1;
+    }
   } else {
     if (rdReply->type!=REDIS_REPLY_ERROR)
       return 1;
@@ -126,7 +129,7 @@ int db_cmd(db_t *db, int code, const char *fmt, ...)
   RDB(db)->rdReply = redisCommand(RDB(db)->rdCtx, RDB(db)->buf);
 
   if (db_check_reply(db, RDB(db)->rdReply, code)) {
-    ERR("Can't make redis command '%s'", RDB(db)->buf);
+    ERR("Wrong answer for redis command '%s'", RDB(db)->buf);
     r = 1;
   }
 
@@ -246,7 +249,7 @@ int db_get_user_receiver(db_t *db, const char *hash, char *receiver, uint16_t le
 
   snprintf(RDB(db)->key, sizeof(RDB(db)->key), "%s:%s", RDB(db)->prefix, hash);
 
-  r = db_cmd(db, 0, "hget %s receiver", key);
+  r = db_cmd(db, 0, "hget %s receiver", RDB(db)->key);
   if (r)
     goto exit;
 
@@ -262,7 +265,7 @@ int db_get_user_receiver(db_t *db, const char *hash, char *receiver, uint16_t le
 exit:
 
   if ((!r)&&(receiver))
-    strncpy(hash, RDB(db)->rdReply->str, len);
+    strncpy(receiver, RDB(db)->rdReply->str, len);
 
   db_free_lastreply(db);
   db_unlock(db);
@@ -339,7 +342,7 @@ int db_get_events_times_list(db_t *db, const char *receiver, const char *etime,
     (*cnt) = RDB(db)->rdReply->elements;
 
   for (i=0; i<(*cnt); ++i) {
-    c = strrchr(RDB(db)->rdReply->element[i], ':');
+    c = strrchr(RDB(db)->rdReply->element[i]->str, ':');
     if (!c)
       continue;
     if (ut_s2nll10(c+1, &eitem[rcnt]))

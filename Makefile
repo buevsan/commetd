@@ -6,7 +6,7 @@ LIBS=-ljson-c -lfcgi -lpthread -lhiredis
 
 all: commetd commet-cli
 
-commetd: dm-main.o utils.o debug.o libdio.o db.o
+commetd: dm-main.o utils.o debug.o libdio.o db.o json-parser.o
 	$(CC) $(CFLAGS) $(LDFLAGS) -o commetd $^ $(LIBS)
 
 commet-cli: cli-main.o utils.o debug.o libdio.o 	

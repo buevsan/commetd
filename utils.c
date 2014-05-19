@@ -167,3 +167,11 @@ int ut_ip2s(uint8_t *d, char *s)
   sprintf(s, "%d.%d.%d.%d", (uint16_t)d[0], (uint16_t)d[1], (uint16_t)d[2], (uint16_t)d[3]);
   return 0;
 }
+
+void ut_gettime(uint64_t *t, uint32_t s)
+{
+  struct timeval tv;
+  memset(&tv, 0, sizeof(tv));
+  gettimeofday(&tv, 0);
+  (*t) = tv.tv_sec*s+tv.tv_usec/(1000000/s);
+}

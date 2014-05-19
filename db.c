@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include "db.h"
 #include "debug.h"
+#include "utils.h"
 
 #define CMBUFSIZE 128
 

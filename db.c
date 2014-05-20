@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <memory.h>
 #include <stdarg.h>
+#include <inttypes.h>
 #include "db.h"
 #include "debug.h"
 #include "utils.h"
@@ -18,11 +19,12 @@ typedef struct {
   char *buf;
   char key[64];
   dbg_desc_t *log;
-  uint16_t event_expire_timer;
+  uint32_t event_expire_timer;
+  uint32_t user_expire_timer;
   uint16_t dbnum;
 } redis_db_t;
 
-#define RDB(db_ptr) ((redis_db_t*)db_ptr)
+#define RDB(db_ptr) ((redis_db_t*)db_ptr->d)
 
 #define ERR(format, ...) debug_print(RDB(db)->log, 0, "ERR: "format"\n", ##__VA_ARGS__)
 #define MSG(format, ...) debug_print(RDB(db)->log, 0, format"\n", ##__VA_ARGS__)
@@ -43,11 +45,21 @@ int db_init(db_t *db)
   memset(db->d, 0, sizeof(redis_db_t));
   RDB(db)->buf = malloc(CMBUFSIZE);
   RDB(db)->event_expire_timer = 100;
+  RDB(db)->user_expire_timer = 86400;
   RDB(db)->prefix="prefix";
 
-  pthread_mutex_init(&RDB(db)->mtx, 0);
+  pthread_mutex_init(&(RDB(db)->mtx), 0);
   return 0;
 }
+
+void db_free(db_t *db)
+{
+  db_disconnect(db);
+  free(RDB(db)->buf);
+  free(db->d);
+  db->d=0;
+}
+
 
 void db_setlog(db_t *db, void *log)
 {
@@ -59,12 +71,21 @@ void db_setdbnum(db_t *db, uint16_t dbnum)
   RDB(db)->dbnum = dbnum;
 }
 
-void db_free(db_t *db)
+void db_set_prefix(db_t *db, char *prefix)
 {
-  free(RDB(db)->buf);
-  free(db->d);
-  db->d=0;
+  RDB(db)->prefix = prefix;
 }
+
+void db_set_event_expire_timer(db_t *db, uint32_t t)
+{
+  RDB(db)->event_expire_timer = t;
+}
+
+void db_set_user_expire_timer(db_t *db, uint32_t t)
+{
+  RDB(db)->user_expire_timer = t;
+}
+
 
 int db_free_reply(redisReply **reply)
 {
@@ -109,7 +130,7 @@ int db_check_reply(db_t *db, redisReply *rdReply, int code)
       return 1;
     }
   } else {
-    if (rdReply->type!=REDIS_REPLY_ERROR)
+    if (rdReply->type==REDIS_REPLY_ERROR)
       return 1;
   }
 
@@ -139,25 +160,44 @@ int db_cmd(db_t *db, int code, const char *fmt, ...)
 
 int db_connect(db_t *db, char *hostname, uint16_t port)
 {
+  int r = 0;
   struct timeval timeout = { 1, 500000 };
+
+  db_lock(db);
 
   RDB(db)->rdCtx = redisConnectWithTimeout(hostname, port, timeout);
   if ((!RDB(db)->rdCtx) || (RDB(db)->rdCtx->err)) {
     ERR("Can't connect to Redis server '%s'!", hostname);
-    return -1;
+    r=1;
+    goto exit;
   }
 
   if (db_cmd(db, 0, "select %u", RDB(db)->dbnum)) {
     redisFree(RDB(db)->rdCtx);
     RDB(db)->rdCtx=0;
+    r=1;
+    goto exit;
   }
 
   if (db_cmd(db, 0, "flushdb")) {
     redisFree(RDB(db)->rdCtx);
     RDB(db)->rdCtx=0;
+    r=1;
   }
 
-  return 0;
+exit:
+
+  db_unlock(db);
+
+  return r;
+}
+
+int db_disconnect(db_t *db)
+{
+  if (RDB(db)->rdCtx) {
+    redisFree(RDB(db)->rdCtx);
+    RDB(db)->rdCtx=0;
+  }
 }
 
 int db_create_user(db_t *db, const char *hash, const char *receiver)
@@ -166,15 +206,27 @@ int db_create_user(db_t *db, const char *hash, const char *receiver)
   db_lock(db);
 
   snprintf(RDB(db)->key, sizeof(RDB(db)->key), "%s:%s", RDB(db)->prefix, hash);
-  DBG("key:'%s' receiver:'%s' ", key, receiver);
+  DBG("key:'%s' hash:'%s'", key, hash);
 
   r = db_cmd(db, 0, "hset %s receiver %s", RDB(db)->key, receiver);
   if (r)
     goto exit;
 
+  r = db_cmd(db, 0, "expire %s %"PRIu32, RDB(db)->key, RDB(db)->user_expire_timer);
+  if (r)
+    goto exit;
+
+  snprintf(RDB(db)->key, sizeof(RDB(db)->key), "%s:r%s", RDB(db)->prefix, receiver);
+  DBG("key:'%s' receiver:'%s' ", key, receiver);
+
   r = db_cmd(db, 0, "hset %s hash %s", RDB(db)->key, hash);
   if (r)
     goto exit;
+
+  r = db_cmd(db, 0, "expire %s %"PRIu32, RDB(db)->key, RDB(db)->user_expire_timer);
+  if (r)
+    goto exit;
+
 
 exit:
 
@@ -287,7 +339,7 @@ int db_set_event_data(db_t *db, const char *receiver, const char *etime, const c
   if (r)
     goto exit;
 
-  r = db_cmd(db, 0, "expire %s %u", RDB(db)->key, RDB(db)->event_expire_timer);
+  r = db_cmd(db, 0, "expire %s %"PRIu32, RDB(db)->key, RDB(db)->event_expire_timer);
   if (r)
     goto exit;
 

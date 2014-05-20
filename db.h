@@ -12,8 +12,12 @@ void db_free(db_t *db);
 
 void db_setlog(db_t *db, void *log);
 void db_setdbnum(db_t *db, uint16_t dbnum);
+void db_set_prefix(db_t *db, char *prefix);
+void db_set_event_expire_timer(db_t *db, uint32_t t);
+void db_set_user_expire_timer(db_t *db, uint32_t t);
 
 int db_connect(db_t *db, char *hostname, uint16_t port);
+int db_disconnect(db_t *db);
 int db_create_user(db_t *db, const char *hash, const char *receiver);
 int db_del_user(db_t *db, const char *hash, const char *receiver);
 int db_get_user_hash(db_t *db, const char *receiver, char *hash, uint16_t len);

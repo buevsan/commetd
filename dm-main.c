@@ -23,11 +23,12 @@
 #include "debug.h"
 #include "utils.h"
 #include "libdio.h"
+#include "db.h"
 
 #define MAXEVENTS_PERRECEIVER 200
 #define MAXTHREADS 1024
 #define THREADBUFSIZE 20000
-#define THREADSTACKSIZE 60
+#define THREADSTACKSIZE 40
 
 typedef struct dm_prm_s
 {
@@ -45,8 +46,9 @@ typedef struct dm_prm_s
 
   uint16_t maxths;
   uint16_t minths;
-  uint16_t event_timer;
-  uint16_t rd_expire_timer;
+  uint16_t wait_event_timer;
+  uint32_t event_expire_timer;
+  uint32_t user_expire_timer;
   uint16_t redisdb;
   uint16_t get_event_sleep;
   char bdprefix[33];
@@ -85,26 +87,30 @@ typedef struct dm_thread_s
 typedef struct dm_fcgi_thprm_s
 {
   int fd;
+  db_t *db;
   uint8_t fcgi_http_debug;
 } dm_fcgi_thprm_t;
 
 typedef struct dm_fcgi_thdata_s
 {
   dm_fcgi_thprm_t p;
-  char *buf;
-  FCGX_Request req;
+  uint8_t *buf;
+  uint64_t *etimes;
   int fd;
+  FCGX_Request req;
 } dm_fcgi_thdata_t;
 
 typedef struct dm_cli_thprm_s
 {
   int fd;
+  db_t *db;
 } dm_cli_thprm_t;
 
 typedef struct dm_cli_thdata_s
 {
   dm_cli_thprm_t p;
   uint8_t *buf;
+  uint64_t *etimes;
   int fd;
 } dm_cli_thdata_t;
 
@@ -138,6 +144,7 @@ typedef struct dm_vars_s
   int fcgi_fd;  
   int cli_fd;
   dbg_desc_t dbg;
+  db_t db;
 
   dm_thpool_t clipool;
   dm_thpool_t fcgipool;
@@ -145,6 +152,14 @@ typedef struct dm_vars_s
 
 } dm_vars_t;
 
+
+typedef struct {
+  uint8_t *buf;
+  uint64_t *etimes;
+  db_t *db;
+  uint8_t *stop;
+  uint32_t wait_event_timer;
+} dm_business_prm_t;
 
 void *dm_cli_thread(void *ptr);
 void *dm_fcgi_thread(void *ptr);
@@ -237,6 +252,7 @@ void *create_fcgi_thdata()
   d = malloc(sizeof(dm_fcgi_thdata_t));
   memset(d, 0, sizeof(dm_fcgi_thdata_t));
   d->buf = malloc(THREADBUFSIZE);
+  d->etimes = malloc(sizeof(uint64_t)*MAXEVENTS_PERRECEIVER);
   d->p.fd = -1;
   return d;
 }
@@ -244,15 +260,17 @@ void *create_fcgi_thdata()
 void free_fcgi_thdata(void *d)
 {
   free(((dm_fcgi_thdata_t *)d)->buf);
+  free(((dm_fcgi_thdata_t *)d)->etimes);
   free(d);
 }
 
 void *create_cli_thdata()
 {
   dm_cli_thdata_t *d;
-  d = malloc(sizeof(dm_fcgi_thdata_t));
-  memset(d, 0, sizeof(dm_fcgi_thdata_t));
+  d = malloc(sizeof(dm_cli_thdata_t));
+  memset(d, 0, sizeof(dm_cli_thdata_t));
   d->buf = malloc(THREADBUFSIZE);
+  d->etimes = malloc(sizeof(uint64_t)*MAXEVENTS_PERRECEIVER);
   d->p.fd = -1;
   return d;
 }
@@ -260,6 +278,7 @@ void *create_cli_thdata()
 void free_cli_thdata(void *d)
 {
   free(((dm_cli_thdata_t *)d)->buf);
+  free(((dm_cli_thdata_t *)d)->etimes);
   free(d);
 }
 
@@ -274,8 +293,9 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.maxths = MAXTHREADS;
   v->prm.redisdb = 3;
   v->prm.redisport = 6379;  
-  v->prm.event_timer = 5;
-  v->prm.rd_expire_timer = 60;
+  v->prm.wait_event_timer = 5;
+  v->prm.event_expire_timer = 60;
+  v->prm.user_expire_timer = 86400;
   v->prm.get_event_sleep = 100;
   strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
   strncpy(v->prm.logfilename, "/var/log/commetd.log", sizeof(v->prm.logfilename));
@@ -336,11 +356,20 @@ int dm_init(dm_vars_t *v)
   }
   libdio_setnonblock(v->fcgi_fd, 1);
 
+  db_init(&v->db);
+  db_setdbnum(&v->db, v->prm.redisdb);
+  db_setlog(&v->db, &v->dbg);
+  db_set_prefix(&v->db, v->prm.bdprefix);
+  db_set_event_expire_timer(&v->db, v->prm.event_expire_timer);
+  db_set_user_expire_timer(&v->db, v->prm.user_expire_timer);
 
   s=0;
   if (v->prm.redisaddr.s_addr)
     s=inet_ntoa(v->prm.redisaddr);
   DBGL(2, "Connecting to REDIS '%s':%u...", s?s:"127.0.0.1", v->prm.redisport);
+
+  if (db_connect(&v->db, s?s:"127.0.0.1", v->prm.redisport))
+    return -1;
 
   struct timeval timeout = { 1, 500000 };
   v->rdCtx = redisConnectWithTimeout(s?s:"127.0.0.1", v->prm.redisport, timeout);
@@ -396,7 +425,6 @@ int dm_init(dm_vars_t *v)
   }
   libdio_setnonblock(v->cli_fd, 1);
 
-
   libdio_signal(SIGINT, sig_handler);
   libdio_signal(SIGTERM, sig_handler);
   libdio_signal(SIGHUP, sig_handler);
@@ -406,10 +434,12 @@ int dm_init(dm_vars_t *v)
   /* assign parameters to threads pools */
   dm_fcgi_thprm_t fcgi_prm;
   fcgi_prm.fd = v->fcgi_fd;
+  fcgi_prm.db = &v->db;
   fcgi_prm.fcgi_http_debug = v->prm.fcgi_http_debug;
 
   dm_cli_thprm_t cli_prm;
   cli_prm.fd = v->cli_fd;
+  cli_prm.db = &v->db;
 
   if (!v->prm.foreground) {
     DBGL(2, "Become a daemon...");
@@ -417,6 +447,8 @@ int dm_init(dm_vars_t *v)
   }
 
   /* start threads */
+  DBG("clipool %s fcgipool %s",v->clipool.name, v->fcgipool.name);
+
   for (i=0; i<v->prm.minths; ++i) {      
     dm_thpool_add(&v->clipool, &cli_prm, sizeof(cli_prm));
     dm_thpool_add(&v->fcgipool, &fcgi_prm, sizeof(fcgi_prm));
@@ -444,6 +476,8 @@ int dm_cleanup(dm_vars_t *v)
     shutdown(v->cli_fd, SHUT_RDWR);
     close(v->cli_fd);
   }
+
+  db_free(&v->db);
 
   debug_free(&v->dbg);
 
@@ -587,13 +621,13 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
       strncpy(p->bdprefix, optarg, sizeof(p->bdprefix));
     break;
     case 8:
-      if (ut_s2n10(optarg, &p->rd_expire_timer)) {
+      if (ut_s2nl10(optarg, &p->event_expire_timer)) {
         printf("Wrong timer!\n");
         return 1;
       }
     break;
     case 9:
-      if (ut_s2n10(optarg, &p->event_timer)) {
+      if (ut_s2n10(optarg, &p->wait_event_timer)) {
         printf("Wrong timer!\n");
         return 1;
       }
@@ -709,7 +743,7 @@ int dm_thpool_del(dm_thpool_t *p, pthread_t tid)
 int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
 {
   dm_thread_t *th=0;
-  int newfd=-1;
+  int newfd=-1, r;
   pthread_t tid;
 
   if (pool->cnt>=pool->maxcnt) {
@@ -742,9 +776,10 @@ int dm_thpool_add(dm_thpool_t *pool, void *data, size_t dsize)
     pool->peakcnt = pool->cnt;
   pthread_mutex_unlock(&pool->mtx);
 
-
-  if (pthread_create(&tid, &pool->th_attr, pool->th_fun, th)) {
-    ERR("thread create error");
+  r = pthread_create(&tid, &pool->th_attr, pool->th_fun, th);
+  /*r = pthread_create(&tid, 0, pool->th_fun, th);*/
+  if (r) {
+    ERR("thread create error '%s'", strerror(r));
     return -1;
   }
 
@@ -918,7 +953,7 @@ void dm_add_jsonanswer(json_object *toobj, int code)
 }
 
 
-int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
+int dm_do_create_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_object **ans)
 {
   int r=0;
   const char *hash, *receiver;
@@ -939,12 +974,18 @@ int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
 
   snprintf(key, sizeof(key), "%s:%s", v->prm.bdprefix, hash);
   DBG("key:%s receiver:%s ", key, receiver);
-
-
   v->rdReply = redisCommand(v->rdCtx, "hset %s receiver %s", key, receiver);
   if (!v->rdReply) {
     r = ERR_DATABASE;
     ERR("Can't set redis key '%s' to '%s'", key, receiver);
+    goto exit;
+  }
+  freeReplyObject(v->rdReply);
+
+  v->rdReply = redisCommand(v->rdCtx, "expire %s %"PRIu32, key, v->prm.user_expire_timer);
+  if (!v->rdReply) {
+    r = ERR_DATABASE;
+    ERR("Can't expire for key '%s'", key );
     goto exit;
   }
   freeReplyObject(v->rdReply);
@@ -958,6 +999,15 @@ int dm_do_create_user(dm_vars_t *v, json_object *req, json_object **ans)
   }
   freeReplyObject(v->rdReply);
 
+  v->rdReply = redisCommand(v->rdCtx, "expire %s %"PRIu32, key, v->prm.user_expire_timer);
+  if (!v->rdReply) {
+    r = ERR_DATABASE;
+    ERR("Can't expire for key '%s'", key);
+    goto exit;
+  }
+  freeReplyObject(v->rdReply);
+
+
 exit:
 
   pthread_mutex_unlock(&v->rdmtx);
@@ -967,7 +1017,7 @@ exit:
   return r;
 }
 
-int dm_do_delete_user(dm_vars_t *v, json_object *req, json_object **ans)
+int dm_do_delete_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_object **ans)
 {
   int r=0;
   const char *hash, *receiver;
@@ -1070,7 +1120,7 @@ void dm_getcurtime(uint64_t *t)
   (*t) = tv.tv_sec*1000+tv.tv_usec/1000;
 }
 
-int dm_do_getnow(dm_vars_t *v, json_object *req, json_object **ans)
+int dm_do_getnow(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_object **ans)
 {
   uint64_t t;
   char times[32];
@@ -1087,7 +1137,7 @@ int dm_do_getnow(dm_vars_t *v, json_object *req, json_object **ans)
   return 0;
 }
 
-int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
+int dm_do_set_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_object **ans)
 {
   int r=0;
   const char *receiver, *edata, *event_type, *iface;
@@ -1138,10 +1188,10 @@ int dm_do_set_event(dm_vars_t *v, json_object *req, json_object **ans)
   }
   freeReplyObject(v->rdReply);
 
-  v->rdReply = redisCommand(v->rdCtx, "expire %s %u", key, v->prm.rd_expire_timer);
+  v->rdReply = redisCommand(v->rdCtx, "expire %s %"PRIu32, key, v->prm.event_expire_timer);
   if (!v->rdReply) {
     r = ERR_DATABASE;
-    ERR("Can't set expire %u for key '%s'", v->prm.rd_expire_timer, key);
+    ERR("Can't set expire %"PRIu32" for key '%s'", v->prm.event_expire_timer, key);
     goto exit;
   }
   freeReplyObject(v->rdReply);
@@ -1287,8 +1337,6 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
 
 exit:
 
-  DBG("");
-
   if (v->rdReply)
     freeReplyObject(v->rdReply);
 
@@ -1362,7 +1410,7 @@ exit:
   return r;
 }
 
-int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
+int dm_do_get_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_object **ans)
 {
   int r=0;
   char lasttime_s[32];
@@ -1435,10 +1483,7 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
 
     dm_getcurtime(&t);
 
-  } while ((!timep) && ((t-st) < (v->prm.event_timer*1000)));
-
-
-
+  } while ((!timep) && ((t-st) < (v->prm.wait_event_timer*1000)) && (!(*bp->stop)));
 
   if (!timep) {
     r = ERR_TIMEOUT;
@@ -1482,10 +1527,10 @@ int dm_do_get_event(dm_vars_t *v, json_object *req, json_object **ans)
     freeReplyObject(rdReply);
 
     rdReply = redisCommand(v->rdCtx, "expire %s:%s:%"PRIu64" %u", prefix, receiver, *timep,
-                           v->prm.rd_expire_timer);
+                           v->prm.event_expire_timer);
     if (!rdReply) {
       r = ERR_DATABASE;
-      ERR("Can't set expire %u for key ''", v->prm.rd_expire_timer);
+      ERR("Can't set expire %"PRIu32" for key ''", v->prm.event_expire_timer);
       freeReplyObject(v->rdReply);
       pthread_mutex_unlock(&v->rdmtx);
       goto exit;
@@ -1514,7 +1559,7 @@ exit:
   return r;
 }
 
-typedef int (*do_cmd_funt_t)(dm_vars_t *, json_object *, json_object**);
+typedef int (*do_cmd_funt_t)(dm_vars_t *, dm_business_prm_t *, json_object *, json_object**);
 
 typedef struct {
   char *name;
@@ -1546,7 +1591,7 @@ json_cmd_table_item_t *dm_find_json_cmd(json_cmd_table_item_t *t, const char *cm
   return 0;
 }
 
-int dm_process_json_cmd(json_object *req, json_object **ans)
+int dm_process_json_cmd(dm_business_prm_t *bp, json_object *req, json_object **ans)
 {
   json_object *cmd_obj=0;
   const char *cmd, *iface;
@@ -1564,7 +1609,6 @@ int dm_process_json_cmd(json_object *req, json_object **ans)
     r = ERR_WRONG_MANDATORY_ITEM;
     goto exit;
   }
-
 
   cmd = json_get_string(req, "cmd");
 
@@ -1594,7 +1638,7 @@ int dm_process_json_cmd(json_object *req, json_object **ans)
   }
 
   /* execute command */
-  cm->do_cmd(&dm_vars, req, ans);
+  cm->do_cmd(&dm_vars, bp, req, ans);
 
 exit:
 
@@ -1608,15 +1652,15 @@ exit:
   return r;
 }
 
-int dm_process_json_cmd_buf(uint8_t *buf)
-{
-  libdio_msg_str_cmd_r_t *rshdr = (libdio_msg_str_cmd_r_t *)buf;
+int dm_process_json_cmd_buf(dm_business_prm_t *bp)
+{    
+  libdio_msg_str_cmd_r_t *rshdr = (libdio_msg_str_cmd_r_t *)bp->buf;
   json_object *req=0, *ans=0, *o;
   int r=0;
 
   DBG("");
 
-  req = json_parse(((libdio_msg_str_cmd_t*)buf)->cmd, json_type_object);
+  req = json_parse(((libdio_msg_str_cmd_t*)bp->buf)->cmd, json_type_object);
   if (!req) {
     r = ERR_WRONG_SYNTAX;
     ans = dm_mk_jsonanswer(r);
@@ -1627,7 +1671,7 @@ int dm_process_json_cmd_buf(uint8_t *buf)
   o = json_object_new_string("cli");
   json_object_object_add(req, "interface", o);
 
-  r = dm_process_json_cmd(req, &ans);
+  r = dm_process_json_cmd(bp, req, &ans);
 
 exit:
 
@@ -1729,6 +1773,8 @@ void *dm_cli_thread(void *ptr)
   libdio_msg_hdr_t *hdr;
   libdio_msg_response_hdr_t *rhdr;
   libdio_msg_str_cmd_r_t *rshdr;    
+  dm_business_prm_t bp;
+
   uint16_t code;
   int r;
 
@@ -1782,7 +1828,12 @@ void *dm_cli_thread(void *ptr)
         break;
         case LIBDIO_MSG_JSON_CMD:
           DBGL(2,"json: %s", ((libdio_msg_str_cmd_t*)hdr)->cmd);
-          dm_process_json_cmd_buf(thd->buf);
+          bp.buf = thd->buf;
+          bp.etimes = thd->etimes;
+          bp.db = thd->p.db;
+          bp.stop = &th->stop;
+          bp.wait_event_timer = dm_vars.prm.wait_event_timer;
+          dm_process_json_cmd_buf(&bp);
         break;
         default:
           LIBDIO_FILLRESPONSE(rhdr, 1, code, 0xFF);
@@ -2110,6 +2161,7 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   char receiver[32];
   int ret;
   json_object *req=0, *ans=0, *o;
+  dm_business_prm_t bp;
 
   #ifdef DM_DEBUG
   dm_print_fcgi_req_params(r);
@@ -2150,7 +2202,12 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   o = json_object_new_string("fcgi");
   json_object_object_add(req, "interface", o);
 
-  dm_process_json_cmd(req, &ans);
+  bp.buf = thd->buf;
+  bp.db = thd->p.db;
+  bp.etimes = thd->etimes;
+  bp.stop = &th->stop;
+  bp.wait_event_timer = v->prm.wait_event_timer;
+  dm_process_json_cmd(&bp, req, &ans);
 
 exit:
 

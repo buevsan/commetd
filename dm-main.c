@@ -189,6 +189,7 @@ dm_vars_t dm_vars;
 #define ERR_UNKNOWN_COMMAND  4
 #define ERR_TIMEOUT  5
 #define ERR_ACCESS   6
+#define ERR_INTERNAL  7
 
 #define ANS_OK 200
 #define ANS_ERROR  500
@@ -208,7 +209,8 @@ err_table_item_t dm_err_table[] = {
   { ERR_DATABASE, ANS_ERROR, "Database operation failed"},
   { ERR_UNKNOWN_COMMAND, ANS_ERROR, "Unknown command"},
   { ERR_TIMEOUT, ANS_TIMEOUT, "Operation timeout"},
-  { ERR_ACCESS, ANS_ACCESS, "Access violation"}
+  { ERR_ACCESS, ANS_ACCESS, "Access violation"},
+  { ERR_INTERNAL, ANS_ERROR, "Internal error"}
 };
 
 err_table_item_t *dm_get_err_msg(int code)
@@ -961,7 +963,7 @@ int dm_do_create_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, jso
 
   DBG("");
 
-  pthread_mutex_lock(&v->rdmtx);
+  /*pthread_mutex_lock(&v->rdmtx);*/
 
   if (dm_json_check(req, create_user_items)) {
     r=ERR_WRONG_MANDATORY_ITEM;
@@ -971,7 +973,10 @@ int dm_do_create_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, jso
   hash = json_get_string(req, "hash");
   receiver = json_get_string(req, "receiver");
 
+  if (db_create_user(bp->db, hash, receiver))
+    r = ERR_DATABASE;
 
+/*
   snprintf(key, sizeof(key), "%s:%s", v->prm.bdprefix, hash);
   DBG("key:%s receiver:%s ", key, receiver);
   v->rdReply = redisCommand(v->rdCtx, "hset %s receiver %s", key, receiver);
@@ -1006,11 +1011,11 @@ int dm_do_create_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, jso
     goto exit;
   }
   freeReplyObject(v->rdReply);
-
+*/
 
 exit:
 
-  pthread_mutex_unlock(&v->rdmtx);
+  /*pthread_mutex_unlock(&v->rdmtx);*/
 
   (*ans)=dm_mk_jsonanswer(r);
 
@@ -1025,7 +1030,7 @@ int dm_do_delete_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, jso
 
   DBG("");
 
-  pthread_mutex_lock(&v->rdmtx);
+  /*pthread_mutex_lock(&v->rdmtx);*/
 
   if (dm_json_check(req, delete_user_items)) {
     r=ERR_WRONG_MANDATORY_ITEM;
@@ -1035,6 +1040,9 @@ int dm_do_delete_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, jso
   hash = json_get_string(req, "hash");
   receiver = json_get_string(req, "receiver");
 
+  if (db_del_user(bp->db, hash, receiver))
+    r = ERR_DATABASE;
+/*
   snprintf(key, sizeof(key), "%s:%s", v->prm.bdprefix, hash);
   DBG("key:%s receiver:%s ", key, receiver);
 
@@ -1054,10 +1062,10 @@ int dm_do_delete_user(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, jso
     goto exit;
   }
   freeReplyObject(v->rdReply);
-
+*/
 exit:
 
-  pthread_mutex_unlock(&v->rdmtx);
+  /*pthread_mutex_unlock(&v->rdmtx);*/
 
   (*ans)=dm_mk_jsonanswer(r);
 
@@ -1094,16 +1102,18 @@ int dm_get_hash_by_receiver(dm_vars_t *v, const char *receiver, char *hash)
   return 0;
 }
 
-int dm_check_receiver(dm_vars_t *v, const char *receiver)
+int dm_check_receiver(dm_business_prm_t *bp, const char *receiver)
 {
-  return dm_get_hash_by_receiver(v, receiver, 0);
+  return db_get_user_hash(bp->db, receiver, 0, 0);
+
+  /*return dm_get_hash_by_receiver(v, receiver, 0);*/
 }
 
-json_object *dm_mk_event_record(const char *event_time, const char *event_type,
+json_object *dm_mk_event_record(uint64_t etime, const char *event_type,
                                 const char *receiver, const char *received, const char *edata)
 {
   json_object *o = json_object_new_object();
-  json_add_string(o, "event_time", event_time);
+  json_add_string_u64(o, "event_time", etime);
   json_add_string(o, "event_type", event_type);
   json_add_string(o, "receiver", receiver);
   json_add_string(o, "received", received);
@@ -1142,13 +1152,12 @@ int dm_do_set_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
   int r=0;
   const char *receiver, *edata, *event_type, *iface;
   json_object *o=0;
-  char event_time[32];
   char key[64];
   uint64_t t;
 
   DBG("");
 
-  pthread_mutex_lock(&v->rdmtx);
+  /*pthread_mutex_lock(&v->rdmtx);*/
 
   dm_getcurtime(&t);
 
@@ -1164,22 +1173,29 @@ int dm_do_set_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
   /* Check receiver only if from cli iface */
   iface = json_get_string(req, "interface");
   if (strcmp(iface, "cli"))
-    if (dm_check_receiver(v, receiver)) {
+    if (dm_check_receiver(bp, receiver)) {
       ERR("Receiver '%s' not exist", receiver);
       r=ERR_ACCESS;
       goto exit;
     }
 
 
-  snprintf(event_time, sizeof(event_time), "%"PRIu64, t);
-  snprintf(key, sizeof(key), "%s:%s:%s", v->prm.bdprefix, receiver, event_time);
+  /*snprintf(event_time, sizeof(event_time), "%"PRIu64, t);
+  snprintf(key, sizeof(key), "%s:%s:%s", v->prm.bdprefix, receiver, event_time);*/
 
-  o = dm_mk_event_record(event_time, event_type, receiver, "0", edata);
+  o = dm_mk_event_record(t, event_type, receiver, "0", edata);
+  if (!o) {
+    r=ERR_INTERNAL;
+    goto exit;
+  }
 
   /*snprintf(value, sizeof(value), "%s", json_object_to_json_string(o));*/
   DBG("key:'%s'' val:'%s'", key, json_object_to_json_string(o));
 
+  if (db_set_event_data(bp->db, receiver, t, json_object_to_json_string(o)))
+    r = ERR_DATABASE;
 
+/*
   v->rdReply = redisCommand(v->rdCtx, "set %s %s", key, json_object_to_json_string(o));
   if (!v->rdReply) {
     r = ERR_DATABASE;
@@ -1195,11 +1211,11 @@ int dm_do_set_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
     goto exit;
   }
   freeReplyObject(v->rdReply);
-
+*/
 
 exit:
 
-  pthread_mutex_unlock(&v->rdmtx);
+  /*pthread_mutex_unlock(&v->rdmtx);*/
 
   if (o)
     json_object_put(o);
@@ -1229,7 +1245,8 @@ json_object * dm_get_event_db_data(dm_vars_t *v, redisReply **rdReplyP, const ch
                                    const char *receiver, uint64_t utime)
 {
   json_object *o=0;
-  redisReply *rdReply = 0;
+  redisReply *rdReply = 0;  
+
 
   rdReply = redisCommand(v->rdCtx, "get %s:%s:%"PRIu64, prefix, receiver, utime);
   if (!rdReply) {
@@ -1255,6 +1272,25 @@ exit:
   return o;
 }
 
+json_object * dm_get_event_db_data2(dm_business_prm_t *bp, const char *receiver, uint64_t utime)
+{
+  json_object *o=0;
+
+  if (db_get_event_data(bp->db, receiver, utime, (char *)bp->buf, THREADBUFSIZE))
+    goto exit;
+
+  o = json_parse((const char *)bp->buf, json_type_object);
+  if (!o) {
+    ERR("Database has record with wrong syntax: '%s'", bp->buf);
+    goto exit;
+  }
+
+exit:
+
+  return o;
+}
+
+
 int dm_get_event_db_received_flag(dm_vars_t *v, const char *prefix,
                                   const char *receiver, uint64_t utime, uint16_t *received)
 {
@@ -1265,6 +1301,7 @@ int dm_get_event_db_received_flag(dm_vars_t *v, const char *prefix,
   o = dm_get_event_db_data(v, &rdReply, prefix, receiver, utime);
   if (!o)
     goto exit;
+
   if (ut_s2n10(json_get_string(o, "received"), received))
     goto exit;
 
@@ -1281,13 +1318,43 @@ exit:
   return r;
 }
 
-int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
+int dm_get_event_db_received_flag2(dm_business_prm_t *bp, const char *receiver,
+                                   uint64_t utime, uint16_t *received)
+{
+  int r = ERR_DATABASE;
+  json_object *o;
+  const char *s;
+
+  o = dm_get_event_db_data2(bp, receiver, utime);
+  if (!o)
+    goto exit;
+
+  s = json_get_string(o, "received");
+  if (!s)
+    goto exit;
+
+  if (ut_s2n10(s, received))
+    goto exit;
+
+  r=0;
+
+exit:
+
+  if (o)
+   json_object_put(o);
+
+  return r;
+}
+
+
+int dm_get_all_events(dm_vars_t *v, dm_business_prm_t *bp, const char *prefix, const char *receiver,
                       char checkreceived, uint64_t *item, uint16_t *cnt)
 {
   int r=0;
   uint16_t i, rcnt, received=1;
   char key[64];
 
+/*
   snprintf(key, sizeof(key), "%s:%s:*", prefix, receiver);
 
   v->rdReply = redisCommand(v->rdCtx, "keys %s ", key);
@@ -1305,22 +1372,35 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
    (*cnt) = v->rdReply->elements;
 
   char *c;
+  */
+
+  if (db_get_events_times_list(bp->db, receiver, item, cnt)) {
+    r = ERR_DATABASE;
+    goto exit;
+  }
+
+  DBGL(2, "db count: %u", *cnt);
 
   rcnt=0;
   for (i=0; i<(*cnt); ++i) {
 
+    DBG("%"PRIu64, item[i]);
+
+    /*
     c = strrchr(v->rdReply->element[i]->str, ':');
     if (!c)
       continue;    
 
     if (ut_s2nll10(c+1, &item[rcnt]))
       continue;
+    */
 
-    DBGL(3,"event_key: '%s'", v->rdReply->element[i]->str);
+    /*DBGL(3,"event_key: '%s'", v->rdReply->element[i]->str);*/
 
     if (checkreceived) {
-      if (dm_get_event_db_received_flag(v, prefix, receiver, item[rcnt], &received))
+      if (dm_get_event_db_received_flag2(bp, receiver, item[i], &received))
         continue;
+      DBG("rc%u", received);
       if (received)
         continue;
     }
@@ -1337,8 +1417,8 @@ int dm_get_all_events(dm_vars_t *v, const char *prefix, const char *receiver,
 
 exit:
 
-  if (v->rdReply)
-    freeReplyObject(v->rdReply);
+  /*if (v->rdReply)
+    freeReplyObject(v->rdReply);*/
 
   (*cnt)=rcnt;
 
@@ -1433,7 +1513,7 @@ int dm_do_get_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
 
   receiver = json_get_string(req, "receiver");
 
-  if (dm_check_receiver(v, receiver)) {
+  if (dm_check_receiver(bp, receiver)) {
     ERR("Receiver '%s' not exist", receiver);
     r=ERR_ACCESS;
     pthread_mutex_unlock(&v->rdmtx);
@@ -1446,9 +1526,7 @@ int dm_do_get_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
   min_event_time = json_get_string(req, "event_last_time");
   not_modified = json_get_string(req, "not_modified");
 
-  prefix = json_get_string(req, "prefix");
-  if (!prefix)
-    prefix = v->prm.bdprefix;
+  prefix = v->prm.bdprefix;
 
   dm_getcurtime(&st);
 
@@ -1460,7 +1538,7 @@ int dm_do_get_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
     cnt = MAXEVENTS_PERRECEIVER;
 
     pthread_mutex_lock(&v->rdmtx);
-    r = dm_get_all_events(v, prefix, receiver, (min_event_time)?0:1, nkeys, &cnt);
+    r = dm_get_all_events(v, bp, prefix, receiver, (min_event_time)?0:1, nkeys, &cnt);
     if (r) {
       pthread_mutex_unlock(&v->rdmtx);
       goto exit;
@@ -1512,6 +1590,12 @@ int dm_do_get_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
     json_object_object_del(event_data_o, "received");
     json_add_string(event_data_o, "received", "1");
 
+    if (db_set_event_data(bp->db, receiver, *timep, json_object_to_json_string(event_data_o))) {
+      r= ERR_DATABASE;
+      pthread_mutex_unlock(&v->rdmtx);
+      goto exit;
+    }
+    /*
     redisReply *rdReply;
 
     rdReply = redisCommand(v->rdCtx, "set %s:%s:%"PRIu64" %s", prefix, receiver, *timep,
@@ -1536,9 +1620,10 @@ int dm_do_get_event(dm_vars_t *v, dm_business_prm_t *bp, json_object *req, json_
       goto exit;
     }
     freeReplyObject(rdReply);
+    */
   }
 
-  freeReplyObject(v->rdReply);
+  /*freeReplyObject(v->rdReply);*/
   pthread_mutex_unlock(&v->rdmtx);
 
 exit:
@@ -1551,10 +1636,8 @@ exit:
     (*ans)=dm_mk_jsonanswer(r);
   }
 
-  if (lasttime) {
-    snprintf(lasttime_s, sizeof(lasttime_s), "%"PRIu64, lasttime);
-    json_add_string(*ans, "event_last_time", lasttime_s);
-  }
+  if (lasttime)
+    json_add_string_u64(*ans, "event_last_time", lasttime);
 
   return r;
 }

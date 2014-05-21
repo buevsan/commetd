@@ -1,3 +1,5 @@
+#include <stdio.h>
+#include <inttypes.h>
 #include "json-parser.h"
 
 json_object *json_new_string(const char *key, const char *value)
@@ -12,6 +14,14 @@ void json_add_string(json_object *o, const char *key, const char *value)
 {
   json_object_object_del(o, key);
   json_object_object_add(o, key, json_object_new_string(value));
+}
+
+void json_add_string_u64(json_object *o, const char *key, uint64_t u64)
+{
+  char s[128];
+  snprintf(s, sizeof(s), "%"PRIu64, u64);
+  json_object_object_del(o, key);
+  json_object_object_add(o, key, json_object_new_string(s));
 }
 
 json_object *json_getobj(json_object *obj, char *key, json_type type)

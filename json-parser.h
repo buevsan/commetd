@@ -12,6 +12,7 @@ typedef struct json_obj_check_item_s {
 
 json_object *json_new_string(const char *key, const char *value);
 void json_add_string(json_object *o, const char *key, const char *value);
+void json_add_string_u64(json_object *o, const char *key, uint64_t u64);
 json_object *json_getobj(json_object *obj, char *key, json_type type);
 const char *json_get_string(json_object *req, char *key);
 int json_check(json_object *obj, json_obj_check_item_t *table);

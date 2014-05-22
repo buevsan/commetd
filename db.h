@@ -28,6 +28,10 @@ int db_get_event_data(db_t *db, const char *receiver, uint64_t etime, char *edat
 
 int db_get_events_times_list(db_t *db, const char *receiver, uint64_t *eitem, uint16_t *cnt);
 
+/* not used now */
+int dm_set_event_lasttime(db_t *db, const char *receiver, uint64_t ltime);
+int dm_get_event_lasttime(db_t *db, const char *receiver, uint64_t *ltime);
+
 
 
 #endif

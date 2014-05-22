@@ -390,7 +390,21 @@ int db_get_event_data(db_t *db, const char *receiver, uint64_t etime, char *edat
   snprintf(RDB(db)->key, sizeof(RDB(db)->key),
            "%s:%s:%"PRIu64, RDB(db)->prefix, receiver, etime);
 
-  r = db_cmd(db, REDIS_REPLY_STRING, "get %s", RDB(db)->key);
+  r = db_cmd(db, 0, "get %s", RDB(db)->key);
+
+  if (r)
+    goto exit;
+
+  if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
+    r = 1;
+    if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
+      DBG("Event not found!");
+    } else {
+      ERR("Not string event data %i", RDB(db)->rdReply->type);
+    }
+  }
+
+exit:
 
   if ((!r)&&(edata))
     strncpy(edata, RDB(db)->rdReply->str, len);
@@ -416,7 +430,7 @@ int db_get_events_times_list(db_t *db, const char *receiver, uint64_t *eitem, ui
   if (r)
     goto exit;
 
-  DBGL(3,"redis reply: t:%i e:%i", RDB(db)->rdReply->type, RDB(db)->rdReply->elements);
+  DBGL(3,"reply items: %i", RDB(db)->rdReply->elements);
 
   /* get minimum size */
   if ((*cnt) < RDB(db)->rdReply->elements) {
@@ -443,3 +457,46 @@ exit:
   return r;
 }
 
+
+int dm_set_event_lasttime(db_t *db, const char *receiver, uint64_t utime)
+{
+  int r=0;
+
+  db_lock(db);
+
+  snprintf(RDB(db)->key, sizeof(RDB(db)->key),
+           "%s:%s:lasttime", RDB(db)->prefix, receiver);
+
+  r = db_cmd(db, 0, "set %s %"PRIu64, RDB(db)->key, utime);
+
+  db_free_lastreply(db);
+  db_unlock(db);
+
+  return r;
+}
+
+int dm_get_event_lasttime(db_t *db, const char *receiver, uint64_t *utime)
+{
+  int r=0;
+
+  db_lock(db);
+
+  snprintf(RDB(db)->key, sizeof(RDB(db)->key),
+           "%s:%s:lasttime", RDB(db)->prefix, receiver);
+
+  r = db_cmd(db, REDIS_REPLY_STRING, "get %s", RDB(db)->key);
+  if (r)
+    goto exit;
+
+  if (ut_s2nll10(RDB(db)->rdReply->str, utime)) {
+    r = 1;
+    ERR("Wrong last event time '%s'", RDB(db)->rdReply->str);
+  }
+
+exit:
+
+  db_free_lastreply(db);
+  db_unlock(db);
+
+  return r;
+}

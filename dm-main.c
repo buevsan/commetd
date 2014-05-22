@@ -138,9 +138,6 @@ typedef struct dm_vars_s
 {
   dm_prm_t prm;
   dm_state_t st;
-  pthread_mutex_t rdmtx;
-  redisContext *rdCtx;
-  redisReply *rdReply;
   int fcgi_fd;  
   int cli_fd;
   dbg_desc_t dbg;
@@ -159,6 +156,7 @@ typedef struct {
   db_t *db;
   uint8_t *stop;
   uint32_t wait_event_timer;
+  char *cookiename;
 } dm_business_prm_t;
 
 void *dm_cli_thread(void *ptr);
@@ -304,7 +302,6 @@ int dm_init_vars(dm_vars_t *v)
   strncpy(v->prm.cookiename, "PHPSESSID", sizeof(v->prm.cookiename));
 
   dm_init_th_pipe(&v->thpipe);
-  pthread_mutex_init(&v->rdmtx, 0);
 
   return 0;
 }
@@ -373,29 +370,7 @@ int dm_init(dm_vars_t *v)
   if (db_connect(&v->db, s?s:"127.0.0.1", v->prm.redisport))
     return -1;
 
-  struct timeval timeout = { 1, 500000 };
-  v->rdCtx = redisConnectWithTimeout(s?s:"127.0.0.1", v->prm.redisport, timeout);
-  if ((!v->rdCtx) || (v->rdCtx->err)) {
-    ERR("Can't connect to Redis server '%s'!", s?s:"127.0.0.1");
-    return -1;
-  }
-
-  v->rdReply = redisCommand(v->rdCtx, "select %u", v->prm.redisdb);
-  if (!(v->rdReply)) {
-    ERR("Can't select db '%u'!", v->prm.redisdb);
-    return -1;
-  }
-  freeReplyObject(v->rdReply);
-
-  v->rdReply = redisCommand(v->rdCtx, "flushdb");
-  if (!(v->rdReply)) {
-    ERR("Can't flush db '%u'!", v->prm.redisdb);
-    return -1;
-  }
-  freeReplyObject(v->rdReply);
-
-
-  /* open cli socket */
+   /* open cli socket */
   struct sockaddr_in sa;  
 
   DBGL(2,"Create cli socket %u...", v->prm.cliport);
@@ -1864,21 +1839,19 @@ int dm_get_cookie_value(char *cookstr, char *name, char *value)
   return 1;
 }
 
-int dm_get_receiver_id(dm_vars_t *v, char *cookies, uint32_t *receiverid)
+int dm_get_receiver_id(dm_business_prm_t *bp, char *cookies, uint32_t *receiverid)
 {
-  char key[128];
   char hash[64];
-  char *prefix=0;
-  int r=0;
+  char receiver[64];
+  int r=0, ret;
 
   if (!cookies)
     return 1;
 
   DBG("cookies:'%s'",cookies);
 
-  pthread_mutex_lock(&v->rdmtx);
 
-  if (dm_get_cookie_value(cookies, v->prm.cookiename, hash)) {
+  if (dm_get_cookie_value(cookies, bp->cookiename, hash)) {
     ERR("Wrong or absent cookie!");
     r = ERR_ACCESS;
     goto exit;
@@ -1892,43 +1865,20 @@ int dm_get_receiver_id(dm_vars_t *v, char *cookies, uint32_t *receiverid)
 
   DBG("cookie hash: %s ", hash);
 
-  if (!prefix)
-    prefix=v->prm.bdprefix;
+  ret = db_get_user_receiver(bp->db, hash, receiver, sizeof(receiver));
 
-  snprintf(key, sizeof(key), "%s:%s", prefix, hash);
+  if (ret) {
+    r = (ret==DB_ERR_NOTFOUND)?ERR_ACCESS:ERR_DATABASE;
+    goto exit;
+  }
 
-
-  v->rdReply = redisCommand(v->rdCtx, "hget %s receiver", key);
-  if (!v->rdReply) {
-    ERR("Can't get key '%s' from redis", key);
+  if (ut_s2nl10(receiver, receiverid)) {
+    ERR("Wrong receiver id");
     r=ERR_DATABASE;
     goto exit;
   }
 
-  if (v->rdReply->type != REDIS_REPLY_STRING) {
-    if (v->rdReply->type == REDIS_REPLY_NIL) {
-      DBG("User not found!");
-      r=ERR_ACCESS;
-    } else {
-      ERR("Not string receiver id %i", v->rdReply->type);
-      r=ERR_DATABASE;
-    }
-    freeReplyObject(v->rdReply);
-    goto exit;
-  }
-
-  if (ut_s2nl10(v->rdReply->str, receiverid)) {
-    ERR("Wrong receiver id");
-    freeReplyObject(v->rdReply);
-    r=ERR_ACCESS;
-    goto exit;
-  }
-
-  freeReplyObject(v->rdReply);
-
 exit:
-
-  pthread_mutex_unlock(&v->rdmtx);
 
   return r;
 }
@@ -1954,7 +1904,15 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   cookie = FCGX_GetParam("HTTP_COOKIE", r->envp);
 
   /*  get receiver from DB */
-  ret = dm_get_receiver_id(v, cookie, &receiverid);
+
+  bp.buf = thd->buf;
+  bp.db = thd->p.db;
+  bp.etimes = thd->etimes;
+  bp.stop = &th->stop;
+  bp.wait_event_timer = v->prm.wait_event_timer;
+  bp.cookiename = v->prm.cookiename;
+
+  ret = dm_get_receiver_id(&bp, cookie, &receiverid);
   if (ret) {
     ans = dm_mk_jsonanswer(ret);
     goto exit;
@@ -1984,11 +1942,6 @@ int dm_process_fcgi(dm_vars_t *v, dm_thread_t *th, dm_fcgi_thdata_t *thd)
   o = json_object_new_string("fcgi");
   json_object_object_add(req, "interface", o);
 
-  bp.buf = thd->buf;
-  bp.db = thd->p.db;
-  bp.etimes = thd->etimes;
-  bp.stop = &th->stop;
-  bp.wait_event_timer = v->prm.wait_event_timer;
   dm_process_json_cmd(&bp, req, &ans);
 
 exit:

@@ -298,6 +298,7 @@ int db_get_user_hash(db_t *db, const char *receiver, char *hash, uint16_t len)
   if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
     r = 1;
     if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
+      r = DB_ERR_NOTFOUND;
       DBG("User not found!");
     } else {
       ERR("Not string hash id %i", RDB(db)->rdReply->type);
@@ -328,9 +329,10 @@ int db_get_user_receiver(db_t *db, const char *hash, char *receiver, uint16_t le
     goto exit;
 
   if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
-    r = 1;
+    r = DB_ERR_ERROR;
     if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
       DBG("User not found!");
+      r = DB_ERR_NOTFOUND;
     } else {
       ERR("Not string receiver id %i", RDB(db)->rdReply->type);
     }
@@ -398,6 +400,7 @@ int db_get_event_data(db_t *db, const char *receiver, uint64_t etime, char *edat
   if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
     r = 1;
     if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
+      r = DB_ERR_NOTFOUND;
       DBG("Event not found!");
     } else {
       ERR("Not string event data %i", RDB(db)->rdReply->type);

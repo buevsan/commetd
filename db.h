@@ -33,5 +33,7 @@ int dm_set_event_lasttime(db_t *db, const char *receiver, uint64_t ltime);
 int dm_get_event_lasttime(db_t *db, const char *receiver, uint64_t *ltime);
 
 
+#define DB_ERR_ERROR 1
+#define DB_ERR_NOTFOUND 2
 
 #endif

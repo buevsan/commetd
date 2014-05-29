@@ -18,7 +18,7 @@
 #include <hiredis/hiredis.h>
 #include <fcgi_config.h>
 #include <fcgiapp.h>
-#include <json/json.h>
+#include <json-c/json.h>
 #include "json-parser.h"
 #include "debug.h"
 #include "utils.h"

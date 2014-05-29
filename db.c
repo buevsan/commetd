@@ -54,6 +54,9 @@ int db_init(db_t *db)
 
 void db_free(db_t *db)
 {
+  if (!db->d)
+    return;
+
   db_disconnect(db);
   free(RDB(db)->buf);
   free(db->d);

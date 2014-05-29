@@ -1,7 +1,7 @@
 #ifndef JSON_PARSER_H
 #define JSON_PARSER_H
 
-#include <json/json.h>
+#include <json-c/json.h>
 
 typedef struct json_obj_check_item_s {
   char *name;

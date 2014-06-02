@@ -886,6 +886,14 @@ int dm_json_check(json_object *obj, dm_json_obj_t *table)
       ERR("Wrong or absent '%s' json key", table[i].name);
       return 1;
     }
+
+    if (table[i].type==json_type_string) {
+      if (!strlen(json_object_get_string(o))) {
+        ERR("Null length '%s' json key", table[i].name);
+        return 1;
+      }
+    }
+
     if (table[i].next)
       if (dm_json_check(o, table[i].next))
         return 1;
@@ -1049,7 +1057,7 @@ int dm_do_set_event(dm_business_prm_t *bp, json_object *req, json_object **ans)
   iface = json_get_string(req, "interface");
   if (strcmp(iface, "cli"))
     if (dm_check_receiver(bp, receiver)) {
-      ERR("Receiver '%s' not exist", receiver);
+      DBG("Receiver '%s' not exist", receiver);
       r=ERR_ACCESS;
       goto exit;
     }
@@ -1180,7 +1188,7 @@ int dm_get_all_events(dm_business_prm_t *bp, const char *receiver,
     if (item[i] != 0) {
       rcnt = (*cnt)-i;
       if (i)
-        memcpy(&item[0], &item[i], sizeof(item[0])*(rcnt));
+        memmove(&item[0], &item[i], sizeof(item[0])*(rcnt));
       break;
     }
 
@@ -1232,7 +1240,7 @@ int dm_do_get_event(dm_business_prm_t *bp, json_object *req, json_object **ans)
   receiver = json_get_string(req, "receiver");
 
   if (dm_check_receiver(bp, receiver)) {
-    ERR("Receiver '%s' not exist", receiver);
+    DBG("Receiver '%s' not exist", receiver);
     r=ERR_ACCESS;
     goto exit;
   }
@@ -1812,9 +1820,9 @@ json_object *dm_qs2json(char *qs)
   return obj;
 }
 
-int dm_get_cookie_value(char *cookstr, char *name, char *value)
+int dm_get_cookie_value(char *cookstr, char *name, char *value, size_t vsize)
 {
-  char *ptr1, *cookie, *n, *ptr2;
+  char *ptr1, *cookie, *n, *ptr2, *v;
   int l,i;
 
   value[0]=0;
@@ -1824,14 +1832,25 @@ int dm_get_cookie_value(char *cookstr, char *name, char *value)
     DBGL(3, "cookie:'%s'",cookie);
     n = strtok_r(cookie, "=", &ptr2);
 
+    if (!n)
+      continue;
+
     /* delete space */
+
     l=strlen(n);
     for (i=0;i<l;++i)
       if (n[0]==' ')
         n++;
 
+    DBGL(3, "n:'%s'",n);
     if (!strcmp(n, name)) {
-      strcpy(value, strtok_r(0, "=", &ptr2));
+      v = strtok_r(0, "=", &ptr2);
+      if (!v)
+        return 1;
+
+      DBGL(3, "v:'%s'",v);
+      strncpy(value, v, vsize);
+
       return 0;
     }
   }
@@ -1850,8 +1869,7 @@ int dm_get_receiver_id(dm_business_prm_t *bp, char *cookies, uint32_t *receiveri
 
   DBG("cookies:'%s'",cookies);
 
-
-  if (dm_get_cookie_value(cookies, bp->cookiename, hash)) {
+  if (dm_get_cookie_value(cookies, bp->cookiename, hash, 64)) {
     ERR("Wrong or absent cookie!");
     r = ERR_ACCESS;
     goto exit;

@@ -2,7 +2,6 @@
 #define DB_H
 #include <stdint.h>
 
-
 typedef struct {
   void *d;
 } db_t;

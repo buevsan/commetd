@@ -1,4 +1,4 @@
-CFLAGS+=-I. -DDM_DEBUG -DCLI_DEBUG -Wall -Wextra
+CFLAGS+=-std=c99 -I. -DDM_DEBUG -DCLI_DEBUG -Wall -Wextra 
 LIBS=-ljson-c -lfcgi -lpthread -lhiredis
 
 %: %.c

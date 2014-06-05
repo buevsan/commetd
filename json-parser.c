@@ -27,7 +27,8 @@ void json_add_string_u64(json_object *o, const char *key, uint64_t u64)
 json_object *json_getobj(json_object *obj, char *key, json_type type)
 {
   json_object *o;
-  o = json_object_object_get(obj, key);
+  if (!json_object_object_get_ex(obj, key, &o))
+    return 0;
   if (json_object_get_type(o)!=type)
     return 0;
   return o;

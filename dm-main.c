@@ -834,8 +834,11 @@ void dm_json_print(char *objname, json_object *jobj)
       default:;
     }
     DBGL(2, "'%s': key:'%s' val:'%s' type:%i", objname, key, vals, type);
-    if (type == json_type_object)
-      dm_json_print(key, json_object_object_get(jobj, key));
+    if (type == json_type_object) {
+      json_object *o;
+      if (json_object_object_get_ex(jobj, key, &o))
+        dm_json_print(key, o);
+    }
   }
 
 }

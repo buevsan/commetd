@@ -87,7 +87,7 @@ int libdio_save_write(int fd, void *buf, size_t size)
     return -1;
   }
 
-  if (r!=size) {
+  if ((size_t)r!=size) {
     ERR("write size error %i != %u", r, size);
     return -1;
   }

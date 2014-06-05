@@ -1,4 +1,4 @@
-CFLAGS+=-std=c99 -I. -DDM_DEBUG -DCLI_DEBUG -Wall -Wextra 
+CFLAGS+=-std=gnu99 -I. -DDM_DEBUG -DCLI_DEBUG -DB_DEBUG -Wall -Wextra -Wno-unused-parameter -g
 LIBS=-ljson-c -lfcgi -lpthread -lhiredis
 
 %: %.c
@@ -14,7 +14,7 @@ commet-cli: cli-main.o utils.o debug.o libdio.o
 		  
 
 clean:
-	rm commetd commet-cli
+	rm -f commetd commet-cli
 	rm -f *.o       	
 	 
 

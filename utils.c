@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
+#include <sys/time.h>
 
 void ut_mac2s(uint8_t * mac, char *s)
 {

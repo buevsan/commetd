@@ -2,7 +2,6 @@
 #define DB_H
 #include <stdint.h>
 
-
 typedef struct {
   void *d;
 } db_t;
@@ -23,12 +22,17 @@ int db_del_user(db_t *db, const char *hash, const char *receiver);
 int db_get_user_hash(db_t *db, const char *receiver, char *hash, uint16_t len);
 int db_get_user_receiver(db_t *db, const char *hash, char *receiver, uint16_t len);
 
-int db_set_event_data(db_t *db, const char *receiver, const char *etime, const char *data);
-int db_get_event_data(db_t *db, const char *receiver, const char *etime, char *edata, uint16_t len);
+int db_set_event_data(db_t *db, const char *receiver, uint64_t etime, const char *data);
+int db_get_event_data(db_t *db, const char *receiver, uint64_t etime, char *edata, uint16_t len);
 
-int db_get_events_times_list(db_t *db, const char *receiver, const char *etime,
-                           uint64_t *eitem, uint16_t *cnt);
+int db_get_events_times_list(db_t *db, const char *receiver, uint64_t *eitem, uint16_t *cnt);
+
+/* not used now */
+int dm_set_event_lasttime(db_t *db, const char *receiver, uint64_t ltime);
+int dm_get_event_lasttime(db_t *db, const char *receiver, uint64_t *ltime);
 
 
+#define DB_ERR_ERROR 1
+#define DB_ERR_NOTFOUND 2
 
 #endif

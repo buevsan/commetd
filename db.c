@@ -9,7 +9,7 @@
 #include "debug.h"
 #include "utils.h"
 
-#define CMBUFSIZE 128
+#define CMBUFSIZE 20000
 
 typedef struct {
   char *prefix;
@@ -31,7 +31,7 @@ typedef struct {
 #define LOG(format, ...) MSG("Commetd: "format, ##__VA_ARGS__)
 
 #ifdef DB_DEBUG
-#define DBGL(level, format, ...) debug_print(&RDB(db)->log, 1+level, "DBG: %lu: %s: "format"\n", pthread_self(),__FUNCTION__, ##__VA_ARGS__)
+#define DBGL(level, format, ...) debug_print(RDB(db)->log, 1+level, "DBG: %lu: %s: "format"\n", pthread_self(),__FUNCTION__, ##__VA_ARGS__)
 #define DBG(format, ...) DBGL(1, format, ##__VA_ARGS__);
 #else
 #define DBG(format, ...)
@@ -54,9 +54,12 @@ int db_init(db_t *db)
 
 void db_free(db_t *db)
 {
-  if (!db->d)
+  if (!db)
     return;
-
+    
+  if (!RDB(db))
+    return; 
+  
   db_disconnect(db);
   free(RDB(db)->buf);
   free(db->d);
@@ -124,8 +127,9 @@ int db_unlock(db_t *db)
 int db_check_reply(db_t *db, redisReply *rdReply, int code)
 {
   if (!rdReply) {
+    DBG("Null redis answer received!");
     return 1;
-  }
+  }  
 
   if (code) {
     if (rdReply->type!=code) {
@@ -133,8 +137,10 @@ int db_check_reply(db_t *db, redisReply *rdReply, int code)
       return 1;
     }
   } else {
-    if (rdReply->type==REDIS_REPLY_ERROR)
+    if (rdReply->type==REDIS_REPLY_ERROR) {
+      DBG("Redis error '%s'!", rdReply->str);
       return 1;
+    }
   }
 
   return 0;
@@ -160,6 +166,23 @@ int db_cmd(db_t *db, int code, const char *fmt, ...)
 
   return r;
 }
+
+int db_cmd_arg(db_t *db, int code, int argc, const char **argv, const size_t *arglen)
+{
+  int r=0;
+
+  db_free_reply(&RDB(db)->rdReply);
+
+  RDB(db)->rdReply = redisCommandArgv(RDB(db)->rdCtx, argc, argv, arglen);
+
+  if (db_check_reply(db, RDB(db)->rdReply, code)) {
+    ERR("Wrong answer for redis command '%s'", RDB(db)->buf);
+    r = 1;
+  }
+
+  return r;
+}
+
 
 int db_connect(db_t *db, char *hostname, uint16_t port)
 {
@@ -201,6 +224,7 @@ int db_disconnect(db_t *db)
     redisFree(RDB(db)->rdCtx);
     RDB(db)->rdCtx=0;
   }
+  return 0;
 }
 
 int db_create_user(db_t *db, const char *hash, const char *receiver)
@@ -209,7 +233,7 @@ int db_create_user(db_t *db, const char *hash, const char *receiver)
   db_lock(db);
 
   snprintf(RDB(db)->key, sizeof(RDB(db)->key), "%s:%s", RDB(db)->prefix, hash);
-  DBG("key:'%s' hash:'%s'", key, hash);
+  DBG("key:'%s' hash:'%s'", RDB(db)->key, hash);
 
   r = db_cmd(db, 0, "hset %s receiver %s", RDB(db)->key, receiver);
   if (r)
@@ -220,7 +244,7 @@ int db_create_user(db_t *db, const char *hash, const char *receiver)
     goto exit;
 
   snprintf(RDB(db)->key, sizeof(RDB(db)->key), "%s:r%s", RDB(db)->prefix, receiver);
-  DBG("key:'%s' receiver:'%s' ", key, receiver);
+  DBG("key:'%s' receiver:'%s' ", RDB(db)->key, receiver);
 
   r = db_cmd(db, 0, "hset %s hash %s", RDB(db)->key, hash);
   if (r)
@@ -280,6 +304,7 @@ int db_get_user_hash(db_t *db, const char *receiver, char *hash, uint16_t len)
   if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
     r = 1;
     if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
+      r = DB_ERR_NOTFOUND;
       DBG("User not found!");
     } else {
       ERR("Not string hash id %i", RDB(db)->rdReply->type);
@@ -310,9 +335,10 @@ int db_get_user_receiver(db_t *db, const char *hash, char *receiver, uint16_t le
     goto exit;
 
   if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
-    r = 1;
+    r = DB_ERR_ERROR;
     if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
       DBG("User not found!");
+      r = DB_ERR_NOTFOUND;
     } else {
       ERR("Not string receiver id %i", RDB(db)->rdReply->type);
     }
@@ -329,16 +355,26 @@ exit:
   return r;
 }
 
-int db_set_event_data(db_t *db, const char *receiver, const char *etime, const char *edata)
+int db_set_event_data(db_t *db, const char *receiver, uint64_t etime, const char *edata)
 {
   int r = 0;
+  const char *argv[3];
+  size_t arglen[3];
 
   db_lock(db);
 
   snprintf(RDB(db)->key, sizeof(RDB(db)->key),
-           "%s:%s:%s", RDB(db)->prefix, receiver, etime);
+           "%s:%s:%"PRIu64, RDB(db)->prefix, receiver, etime);
 
-  r = db_cmd(db, 0, "set %s %s", RDB(db)->key, edata);
+  argv[0]="set";
+  argv[1]=RDB(db)->key;
+  argv[2]=edata;
+
+  arglen[0]=3;
+  arglen[1]=strlen(RDB(db)->key);
+  arglen[2]=strlen(edata);
+
+  r = db_cmd_arg(db, 0, 3, argv, arglen);
   if (r)
     goto exit;
 
@@ -354,15 +390,30 @@ exit:
   return r;
 }
 
-int db_get_event_data(db_t *db, const char *receiver, const char *etime, char *edata, uint16_t len)
+int db_get_event_data(db_t *db, const char *receiver, uint64_t etime, char *edata, uint16_t len)
 {
   int r = 0;
   db_lock(db);
 
   snprintf(RDB(db)->key, sizeof(RDB(db)->key),
-           "%s:%s:%s", RDB(db)->prefix, receiver, etime);
+           "%s:%s:%"PRIu64, RDB(db)->prefix, receiver, etime);
 
-  r = db_cmd(db, REDIS_REPLY_STRING, "get %s", RDB(db)->key);
+  r = db_cmd(db, 0, "get %s", RDB(db)->key);
+
+  if (r)
+    goto exit;
+
+  if (RDB(db)->rdReply->type != REDIS_REPLY_STRING) {
+    r = 1;
+    if (RDB(db)->rdReply->type == REDIS_REPLY_NIL) {
+      r = DB_ERR_NOTFOUND;
+      DBG("Event not found!");
+    } else {
+      ERR("Not string event data %i", RDB(db)->rdReply->type);
+    }
+  }
+
+exit:
 
   if ((!r)&&(edata))
     strncpy(edata, RDB(db)->rdReply->str, len);
@@ -373,8 +424,7 @@ int db_get_event_data(db_t *db, const char *receiver, const char *etime, char *e
   return r;
 }
 
-int db_get_events_times_list(db_t *db, const char *receiver, const char *etime,
-                           uint64_t *eitem, uint16_t *cnt)
+int db_get_events_times_list(db_t *db, const char *receiver, uint64_t *eitem, uint16_t *cnt)
 {
   int r = 0;
   uint16_t i, rcnt=0;
@@ -389,7 +439,7 @@ int db_get_events_times_list(db_t *db, const char *receiver, const char *etime,
   if (r)
     goto exit;
 
-  DBGL(3,"redis reply: t:%i e:%i", v->rdReply->type, v->rdReply->elements);
+  DBGL(3,"reply items: %i", RDB(db)->rdReply->elements);
 
   /* get minimum size */
   if ((*cnt) < RDB(db)->rdReply->elements) {
@@ -416,3 +466,46 @@ exit:
   return r;
 }
 
+
+int dm_set_event_lasttime(db_t *db, const char *receiver, uint64_t utime)
+{
+  int r=0;
+
+  db_lock(db);
+
+  snprintf(RDB(db)->key, sizeof(RDB(db)->key),
+           "%s:%s:lasttime", RDB(db)->prefix, receiver);
+
+  r = db_cmd(db, 0, "set %s %"PRIu64, RDB(db)->key, utime);
+
+  db_free_lastreply(db);
+  db_unlock(db);
+
+  return r;
+}
+
+int dm_get_event_lasttime(db_t *db, const char *receiver, uint64_t *utime)
+{
+  int r=0;
+
+  db_lock(db);
+
+  snprintf(RDB(db)->key, sizeof(RDB(db)->key),
+           "%s:%s:lasttime", RDB(db)->prefix, receiver);
+
+  r = db_cmd(db, REDIS_REPLY_STRING, "get %s", RDB(db)->key);
+  if (r)
+    goto exit;
+
+  if (ut_s2nll10(RDB(db)->rdReply->str, utime)) {
+    r = 1;
+    ERR("Wrong last event time '%s'", RDB(db)->rdReply->str);
+  }
+
+exit:
+
+  db_free_lastreply(db);
+  db_unlock(db);
+
+  return r;
+}

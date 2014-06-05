@@ -248,8 +248,11 @@ int libdio_waitfd(int fd, uint16_t timer, char m)
 
     if (r<0) {
 
-      if ((errno==EINTR) && (timer))
-         return 1;
+      if (errno==EINTR)
+        if (timer)
+          return 1;
+        else
+          continue;
 
       ERR("select: %s", strerror(errno));
       return -1;

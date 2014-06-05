@@ -54,11 +54,10 @@ typedef struct dm_prm_s
   char bdprefix[33];
   char logfilename[128];
   char cookiename[33];
-  struct {
+
    uint8_t foreground:1;
    uint8_t fcgi_http_debug:1;
    uint8_t no_check_iface:1;
-  };
 } dm_prm_t;
 
 typedef struct dm_th_pipe_s

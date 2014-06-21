@@ -13,12 +13,20 @@ void ut_mac2s(uint8_t * mac, char *s)
   sprintf(&s[15], "%02X", (uint16_t)mac[5]);
 }
 
+int ut_ishex_str(const char *s)
+{
+  while (*s) {
+    if (!isxdigit(*s))
+      return 1;
+    s++;
+  }
+  return 0;
+}
+
 int ut_s2n16(const char *s, uint16_t *n)
 {
-  uint8_t i=0;
-  while (s[i])
-    if (!isxdigit(s[i++]))
-      return 1;
+  if (ut_ishex_str(s))
+    return 1;
 
   (*n) = strtoul(s, 0, 16);
   return 0;
@@ -26,10 +34,8 @@ int ut_s2n16(const char *s, uint16_t *n)
 
 int ut_s2nl16(const char *s, uint32_t *n)
 {
-  uint8_t i=0;
-  while (s[i])
-    if (!isxdigit(s[i++]))
-      return 1;
+  if (ut_ishex_str(s))
+    return 1;
 
   (*n) = strtoul(s, 0, 16);
   return 0;
@@ -93,12 +99,21 @@ int ut_s2mac(uint8_t * mac, char *s)
 
 }
 
+int ut_isdec_str(const char *s)
+{
+  while (*s) {
+    if (!isdigit(*s))
+      return 1;
+    s++;
+  }
+  return 0;
+}
+
+
 int ut_s2n10(const char *s, uint16_t *n)
 {
-  uint8_t i=0;
-  while (s[i])
-    if (!isdigit(s[i++]))
-      return 1;
+  if (ut_isdec_str(s))
+    return 1;
 
   (*n) = strtoul(s, 0, 10);
   return 0;
@@ -106,10 +121,8 @@ int ut_s2n10(const char *s, uint16_t *n)
 
 int ut_s2nl10(const char *s, uint32_t *n)
 {
-  uint8_t i=0;
-  while (s[i])
-    if (!isdigit(s[i++]))
-      return 1;
+  if (ut_isdec_str(s))
+    return 1;
 
   (*n) = strtoul(s, 0, 10);
   return 0;
@@ -117,10 +130,8 @@ int ut_s2nl10(const char *s, uint32_t *n)
 
 int ut_s2nll10(const char *s, uint64_t *n)
 {
-  uint8_t i=0;
-  while (s[i])
-    if (!isdigit(s[i++]))
-      return 1;
+  if (ut_isdec_str(s))
+    return 1;
 
   (*n) = strtoull(s, 0, 10);
   return 0;
@@ -129,10 +140,9 @@ int ut_s2nll10(const char *s, uint64_t *n)
 
 int ut_changecase(char *s, char up)
 {
-  int i = 0;
-  while (s[i]) {
-    s[i]=(up)?toupper(s[i]):tolower(s[i]);
-    i++;
+  while (*s) {
+    (*s)=(up)?toupper(*s):tolower(*s);
+    s++;
   }
   return 0;
 }

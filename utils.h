@@ -15,6 +15,7 @@ int ut_changecase(char *s, char up);
 int ut_hexdump(FILE *f, void *buf, size_t size);
 int ut_ip2s(uint8_t *d, char *s);
 void ut_gettime(uint64_t *t, uint32_t s);
+void ut_strncpy(char *d, const char *s, size_t len);
 
 #define ut_gettime_s(t) ut_gettime(t, 1)
 #define ut_gettime_ms(t) ut_gettime(t, 1000)

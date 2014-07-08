@@ -313,8 +313,9 @@ int db_get_user_hash(db_t *db, const char *receiver, char *hash, uint16_t len)
 
 exit:
 
-  if ((!r)&&(hash))
-    strncpy(hash, RDB(db)->rdReply->str, len);
+  if ((!r)&&(hash)) {
+    ut_strncpy(hash, RDB(db)->rdReply->str, len);
+  }
 
   db_free_lastreply(db);
   db_unlock(db);
@@ -346,8 +347,10 @@ int db_get_user_receiver(db_t *db, const char *hash, char *receiver, uint16_t le
 
 exit:
 
-  if ((!r)&&(receiver))
-    strncpy(receiver, RDB(db)->rdReply->str, len);
+  if ((!r)&&(receiver)) {
+    ut_strncpy(receiver, RDB(db)->rdReply->str, len);
+
+  }
 
   db_free_lastreply(db);
   db_unlock(db);
@@ -416,7 +419,7 @@ int db_get_event_data(db_t *db, const char *receiver, uint64_t etime, char *edat
 exit:
 
   if ((!r)&&(edata))
-    strncpy(edata, RDB(db)->rdReply->str, len);
+    ut_strncpy(edata, RDB(db)->rdReply->str, len);
 
   db_free_lastreply(db);
   db_unlock(db);

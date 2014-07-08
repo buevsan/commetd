@@ -297,9 +297,9 @@ int dm_init_vars(dm_vars_t *v)
   v->prm.event_expire_timer = 60;
   v->prm.user_expire_timer = 86400;
   v->prm.get_event_sleep = 100;
-  strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
-  strncpy(v->prm.logfilename, "/var/log/commetd.log", sizeof(v->prm.logfilename));
-  strncpy(v->prm.cookiename, "PHPSESSID", sizeof(v->prm.cookiename));
+  ut_strncpy(v->prm.bdprefix, "prefix", sizeof(v->prm.bdprefix));
+  ut_strncpy(v->prm.logfilename, "/var/log/commetd.log", sizeof(v->prm.logfilename));
+  ut_strncpy(v->prm.cookiename, "PHPSESSID", sizeof(v->prm.cookiename));
 
   dm_init_th_pipe(&v->thpipe);
 
@@ -595,7 +595,7 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
       }
     break;
     case 7:
-      strncpy(p->bdprefix, optarg, sizeof(p->bdprefix));
+      ut_strncpy(p->bdprefix, optarg, sizeof(p->bdprefix));
     break;
     case 8:
       if (ut_s2nl10(optarg, &p->event_expire_timer)) {
@@ -610,7 +610,7 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
       }
     break;
     case 10:
-      strncpy(p->logfilename, optarg, sizeof(p->logfilename));
+      ut_strncpy(p->logfilename, optarg, sizeof(p->logfilename));
     break;
     case 11:
       p->fcgi_http_debug=1;
@@ -625,7 +625,7 @@ int dm_handle_long_opt(dm_prm_t *p, int idx)
       }
     break;
     case 14:
-      strncpy(p->cookiename, optarg, sizeof(p->cookiename));
+      ut_strncpy(p->cookiename, optarg, sizeof(p->cookiename));
     break;
   }
   return 0;
@@ -1267,9 +1267,10 @@ int dm_do_get_event(dm_business_prm_t *bp, json_object *req, json_object **ans)
     mintime=0;
     if (min_event_time) {
       if (ut_s2nll10(min_event_time, &mintime)) {
-        ERR("Wrong min_event_time!");
+        ERR("Wrong event_last_time '%s'!", min_event_time);
+        r = ERR_WRONG_SYNTAX;
         goto exit;
-      }
+      }      
     }
 
     timep = dm_find_event(bp->etimes, cnt, mintime);
@@ -1853,6 +1854,7 @@ int dm_get_cookie_value(char *cookstr, char *name, char *value, size_t vsize)
 
       DBGL(3, "v:'%s'",v);
       strncpy(value, v, vsize);
+      value[vsize-1]=0;
 
       return 0;
     }

@@ -283,7 +283,7 @@ int cli_execute_cm(int fd, void *buf, size_t bufsize, char *command, char json, 
   libdio_msg_str_cmd_t *hdr=(libdio_msg_str_cmd_t *)buf;
   hdr->hdr.code = htons((!json)?LIBDIO_MSG_STR_CMD:LIBDIO_MSG_JSON_CMD);
   hdr->hdr.len = htons(strlen(command)+1);
-  strncpy(hdr->cmd, command, bufsize-sizeof(libdio_msg_hdr_t));
+  ut_strncpy(hdr->cmd, command, bufsize-sizeof(libdio_msg_hdr_t));
 
   if (libdio_write_message(fd, buf))
     goto error;

@@ -1,9 +1,11 @@
-#include "utils.h"
 #include <stdarg.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <string.h>
 #include <sys/time.h>
+#include <errno.h>
+
+#include "utils.h"
 
 void ut_mac2s(uint8_t * mac, char *s)
 {
@@ -15,6 +17,9 @@ void ut_mac2s(uint8_t * mac, char *s)
 
 int ut_ishex_str(const char *s)
 {
+  if ( (!s) || (!s[0]) )
+      return 1;
+
   while (*s) {
     if (!isxdigit(*s))
       return 1;
@@ -23,21 +28,68 @@ int ut_ishex_str(const char *s)
   return 0;
 }
 
+int ut_s2ul(const char *s, int base, unsigned long int *r)
+{
+  char *p;
+
+  errno=0;
+  (*r) = strtoul(s, &p, base);
+
+  if (errno)
+    return 1;
+
+  if (*p)
+    return 1;
+
+  return 0;
+}
+
+int ut_s2ull(const char *s, int base, unsigned long long int *r)
+{
+  char *p;
+
+  errno=0;
+  (*r) = strtoull(s, &p, base);
+
+  if (errno)
+    return 1;
+
+  if (*p)
+    return 1;
+
+  return 0;
+}
+
 int ut_s2n16(const char *s, uint16_t *n)
 {
+  unsigned long int r;
+
   if (ut_ishex_str(s))
     return 1;
 
-  (*n) = strtoul(s, 0, 16);
+  if (ut_s2ul(s, 16, &r))
+    return 1;
+
+  if (r>65535)
+    return 1;
+
+  (*n) = r;
+
   return 0;
 }
 
 int ut_s2nl16(const char *s, uint32_t *n)
 {
+  unsigned long int r;
+
   if (ut_ishex_str(s))
     return 1;
 
-  (*n) = strtoul(s, 0, 16);
+  if (ut_s2ul(s, 16, &r))
+    return 1;
+
+  (*n) = r;
+
   return 0;
 }
 
@@ -100,7 +152,10 @@ int ut_s2mac(uint8_t * mac, char *s)
 }
 
 int ut_isdec_str(const char *s)
-{
+{    
+  if ( (!s) || (!s[0]) )
+    return 1;
+
   while (*s) {
     if (!isdigit(*s))
       return 1;
@@ -109,34 +164,51 @@ int ut_isdec_str(const char *s)
   return 0;
 }
 
-
 int ut_s2n10(const char *s, uint16_t *n)
 {
+  unsigned long int r;
+
   if (ut_isdec_str(s))
     return 1;
 
-  (*n) = strtoul(s, 0, 10);
+  if (ut_s2ul(s, 10, &r))
+    return 1;
+
+  if (r>65535)
+    return 1;
+
+  (*n) = r;
+
   return 0;
 }
 
 int ut_s2nl10(const char *s, uint32_t *n)
 {
+  unsigned long int r;
+
   if (ut_isdec_str(s))
     return 1;
 
-  (*n) = strtoul(s, 0, 10);
+  if (ut_s2ul(s, 10, &r))
+    return 1;
+
+  (*n) = r;
+
   return 0;
 }
 
 int ut_s2nll10(const char *s, uint64_t *n)
 {
+  unsigned long long int r;
   if (ut_isdec_str(s))
     return 1;
 
-  (*n) = strtoull(s, 0, 10);
+  if (ut_s2ull(s, 10, &r))
+    return 1;
+
+  (*n) = r;
   return 0;
 }
-
 
 int ut_changecase(char *s, char up)
 {
@@ -185,4 +257,12 @@ void ut_gettime(uint64_t *t, uint32_t s)
   memset(&tv, 0, sizeof(tv));
   gettimeofday(&tv, 0);
   (*t) = tv.tv_sec*s+tv.tv_usec/(1000000/s);
+}
+
+void ut_strncpy(char *d, const char *s, size_t len)
+{
+  if (!len)
+    return;
+  strncpy(d, s, len);
+  d[len-1] = 0;
 }
